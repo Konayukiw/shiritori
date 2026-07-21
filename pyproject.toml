@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shiritori-bot"
+version = "0.1.0"
+description = "Local Japanese shiritori bot (JMdict + SudachiDict)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "jaconv>=0.3.4",
+]
+
+[project.scripts]
+shiritori-bot = "shiritori_bot.main:main"
+
+[tool.setuptools.packages.find]
+include = ["shiritori_bot*"]
