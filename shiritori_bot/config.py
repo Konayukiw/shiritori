@@ -27,7 +27,6 @@ class GameConfig:
         allow_other: その他カテゴリを許可するか
         allow_verb: 動詞を許可するか
         require_dakuten_match: 濁点・半濁点の一致を要求するか
-            False の場合、か/が や は/ぱ などを同一視する
         allow_alnum: アルファベット・数字を含む表記を許可するか
         ban_one_mora: 1モーラ語を禁止するか
         ban_obsolete_kana: ゑ/ゐ など現代50音にない文字を禁止するか

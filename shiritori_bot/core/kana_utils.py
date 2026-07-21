@@ -1,5 +1,3 @@
-"""かな変換・文字種チェック."""
-
 from __future__ import annotations
 
 import re

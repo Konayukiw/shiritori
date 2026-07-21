@@ -1,16 +1,3 @@
-"""Bot語彙プールからの候補検索・選択.
-
-選択フローは shiritori-Github の ``SystemWordSelector`` に合わせる:
-
-1. 直前語から要求される先頭モーラを決める
-2. しりとり辞書（語彙プール）からその先頭で始まる候補を取る
-3. 候補からランダムに 1 語選ぶ
-4. 候補が無ければ Bot 負け
-
-既出読みの除外は Python 版の対局ルール整合のため維持する
-（GitHub 側は選択時に除外せず、後段バリデーションで弾く）。
-"""
-
 from __future__ import annotations
 
 import random

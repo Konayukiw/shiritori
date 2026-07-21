@@ -1,17 +1,3 @@
-"""Bot語彙プール構築.
-
-shiritori-Github のしりとり辞書作成フローを踏襲する:
-
-1. SudachiDict の small_lex を主ソースにする
-   (``run_create.sh`` が ``small_lex.csv | grep 名詞,普通名詞,一般`` するのと同趣旨)
-2. デフォルトの general は ``名詞,普通名詞,一般`` のみ
-3. 表層形は日本語文字のみ（英数字・記号だらけの語を除外）
-4. 読みはひらがな化し、1モーラ / 「ん」終わり / 旧仮名を除外
-5. first_mora でインデックス（実行時は先頭モーラで引いてランダム選択）
-
-固有名詞・動詞など CLI オプション用カテゴリは現状どおり保持する。
-"""
-
 from __future__ import annotations
 
 import csv

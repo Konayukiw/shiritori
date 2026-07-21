@@ -1,5 +1,3 @@
-"""しりとりBot CLI 対話ループ."""
-
 from __future__ import annotations
 
 import argparse

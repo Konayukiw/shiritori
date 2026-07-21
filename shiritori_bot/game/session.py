@@ -1,5 +1,3 @@
-"""GameState: 直前語・使用済み単語・設定."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
