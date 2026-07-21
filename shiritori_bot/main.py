@@ -76,7 +76,7 @@ def config_from_args(args: argparse.Namespace) -> GameConfig:
 
 def print_banner(cfg: GameConfig) -> None:
     print("=" * 50)
-    print("  しりとり Bot (ローカル完結)")
+    print("  しりとり Bot")
     print("=" * 50)
     print("設定:")
     print(f"  人名: {'許可' if cfg.allow_person else '禁止'}")
@@ -187,6 +187,7 @@ def run_game(cfg: GameConfig, *, bot_first: bool = False) -> int:
             if result.lost:
                 print(f"  {result.surface}（{result.reading}）")
                 print(f"  {result.reason}")
+                print(f"今回の対戦は {state.turn_count} ターンで終了しました。")
                 break
 
             state.mark_used(result.reading, result.surface, "user")
@@ -195,6 +196,7 @@ def run_game(cfg: GameConfig, *, bot_first: bool = False) -> int:
             bot_word = selector.select(result.effective_last_mora or "", state.used_readings)
             if bot_word is None:
                 print("参りました、私の負けです。")
+                print(f"今回の対戦は {state.turn_count} ターンで終了しました。")
                 break
 
             print(f"ボット: {bot_word.surface}（{bot_word.reading}）")
