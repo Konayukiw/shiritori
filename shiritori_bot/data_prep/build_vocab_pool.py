@@ -1,3 +1,17 @@
+"""Bot語彙プール構築.
+
+shiritori-Github のしりとり辞書作成フローを踏襲する:
+
+1. SudachiDict の small_lex を主ソースにする
+   (``run_create.sh`` が ``small_lex.csv | grep 名詞,普通名詞,一般`` するのと同趣旨)
+2. デフォルトの general は ``名詞,普通名詞,一般`` のみ
+3. 表層形は日本語文字のみ（英数字・記号だらけの語を除外）
+4. 読みはひらがな化し、1モーラ / 「ん」終わり / 旧仮名を除外
+5. first_mora でインデックス（実行時は先頭モーラで引いてランダム選択）
+
+固有名詞・動詞など CLI オプション用カテゴリは現状どおり保持する。
+"""
+
 from __future__ import annotations
 
 import csv
@@ -8,6 +22,7 @@ from pathlib import Path
 from shiritori_bot.config import DEFAULT_CACHE_DIR, DEFAULT_RAW_DIR, VOCAB_DB_NAME
 from shiritori_bot.core.kana_utils import (
     contains_obsolete_kana,
+    is_allowed_surface,
     is_kana_only_reading,
     normalize_reading,
     to_hiragana,
@@ -32,6 +47,9 @@ COL_NORM = 12
 
 CONJUGATING_POS = frozenset({"動詞", "形容詞"})
 
+# shiritori-Github と同様、Bot の標準語彙は small_lex を優先する
+PREFERRED_LEX_ORDER = ("small_lex.csv", "core_lex.csv", "notcore_lex.csv")
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
@@ -55,6 +73,9 @@ CREATE INDEX IF NOT EXISTS idx_vocab_category ON vocab(category);
 def classify_pos(pos1: str, pos2: str, pos3: str, pos4: str = "") -> str | None:
     """UniDic/Sudachi 品詞からカテゴリを決定.
 
+    general は shiritori-Github と同じ ``名詞,普通名詞,一般`` のみ。
+    固有名詞・動詞は CLI フラグ用に別カテゴリで残す。
+
     Returns:
         general | verb | person | place | organization | proper | other
         None = 語彙プールに入れない (助詞など)
@@ -70,37 +91,52 @@ def classify_pos(pos1: str, pos2: str, pos3: str, pos4: str = "") -> str | None:
             if pos3 in ("一般", "*"):
                 return "proper"
             return "other"
-        if pos2 in ("普通名詞", "数詞", "固有名詞"):
+        # GitHub: small_lex の 名詞,普通名詞,一般 のみをしりとり辞書に採用
+        if pos2 == "普通名詞" and pos3 == "一般":
             return "general"
-        return "general"
+        return None
 
     if pos1 == "動詞":
         return "verb"
 
-    if pos1 in ("形容詞", "形状詞", "副詞", "連体詞", "感動詞", "代名詞"):
-        return "general"
-
     return None
 
 
-def _find_lex_csvs(raw_dir: Path) -> list[Path]:
+def _find_lex_csvs(raw_dir: Path, *, small_only: bool = True) -> list[Path]:
+    """語彙 CSV を優先順で列挙する.
+
+    small_only=True (既定): shiritori-Github 同様 small_lex のみ。
+    small_only=False: small → core → notcore の順で見つかったものを全部。
+    """
     sudachi = raw_dir / "sudachi"
-    paths: list[Path] = []
     search_dirs = [sudachi, raw_dir]
+    found: dict[str, Path] = {}
+
     for d in search_dirs:
         if not d.is_dir():
             continue
-        for name in ("small_lex.csv", "core_lex.csv", "notcore_lex.csv"):
+        for name in PREFERRED_LEX_ORDER:
             p = d / name
-            if p.exists():
-                paths.append(p)
+            if p.exists() and name not in found:
+                found[name] = p
         for p in sorted(d.glob("*lex*.csv")):
-            if p not in paths:
-                paths.append(p)
-        for p in sorted(d.glob("*_lex")):
-            if p.is_file() and p not in paths:
-                paths.append(p)
-    return paths
+            if p.name not in found:
+                found[p.name] = p
+
+    if small_only:
+        if "small_lex.csv" in found:
+            return [found["small_lex.csv"]]
+        # small が無い場合は見つかった先頭を使う
+        return list(found.values())[:1] if found else []
+
+    ordered: list[Path] = []
+    for name in PREFERRED_LEX_ORDER:
+        if name in found:
+            ordered.append(found[name])
+    for name, p in found.items():
+        if p not in ordered:
+            ordered.append(p)
+    return ordered
 
 
 def _is_dictionary_form(pos1: str, cform: str) -> bool:
@@ -111,7 +147,14 @@ def _is_dictionary_form(pos1: str, cform: str) -> bool:
 
 
 def _parse_row(row: list[str]) -> tuple[str, str, str] | None:
-    """CSV 1行 → (surface, reading_hira, category) or None."""
+    """CSV 1行 → (surface, reading_hira, category) or None.
+
+    shiritori-Github の ``checkWord`` に相当するフィルタ:
+    - 品詞が採用対象か
+    - 読みがあり、かなのみで長さ > 1
+    - 表層が日本語として許容されるか（英数字だらけを除外）
+    - 「ん」終わり・旧仮名・1モーラを除外
+    """
     if len(row) < 12:
         return None
 
@@ -137,10 +180,16 @@ def _parse_row(row: list[str]) -> tuple[str, str, str] | None:
     if pos1 in CONJUGATING_POS and norm and norm != "*":
         surface = norm
 
+    # GitHub の kuromoji 検証の近似: 表層がしりとり語として不自然なものは落とす
+    # （1000th / CYBER / .com など。GitHub 側は形態素解析不一致で落ちる）
+    if not is_allowed_surface(surface, allow_alnum=False):
+        return None
+
     reading = to_hiragana(normalize_reading(reading_raw))
     if not reading:
         return None
 
+    # GitHub: reading.length === 1 を除外 / 読みはカタカナのみ
     if not is_kana_only_reading(reading, allow_alnum=False):
         return None
     if contains_obsolete_kana(reading):
@@ -167,6 +216,7 @@ def build_pool(csv_paths: list[Path], out_db: Path) -> int:
     conn.execute("PRAGMA synchronous=OFF")
     conn.executescript(SCHEMA)
 
+    # GitHub は surface+reading で重複排除。こちらは reading 単位（既出読み禁止と整合）
     seen: set[str] = set()
     batch: list[tuple[str, str, str, str]] = []
     total = 0
@@ -234,12 +284,13 @@ def main(argv: list[str] | None = None) -> int:
     raw_dir = DEFAULT_RAW_DIR
     cache_dir = DEFAULT_CACHE_DIR
     auto_download = "--download" in argv
-    argv = [a for a in argv if a != "--download"]
+    all_lex = "--all-lex" in argv
+    argv = [a for a in argv if a not in ("--download", "--all-lex")]
 
     if auto_download:
         download_sudachi(raw_dir)
 
-    csvs = _find_lex_csvs(raw_dir)
+    csvs = _find_lex_csvs(raw_dir, small_only=not all_lex)
     if not csvs:
         print(
             "SudachiDict CSV が見つかりません。\n"
@@ -250,6 +301,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(f"対象 CSV: {[p.name for p in csvs]}")
+    if not all_lex:
+        print("  (shiritori-Github 同様 small_lex のみ。全 lex は --all-lex)")
     out = cache_dir / VOCAB_DB_NAME
     build_pool(csvs, out)
     return 0

@@ -1,6 +1,6 @@
 # しりとり Bot
 
-オフラインで実行可能なしりとり Bot です。相手の入力を **JMdictおよびJMnedict** で存在確認し、Bot の回答語彙は **SudachiDictのCSV** から構築します。
+オフラインで実行可能なしりとり Bot です。相手の入力を **JMdictおよびJMnedict** で存在確認し、Bot の回答語彙は **SudachiDict の small_lex** から構築します（[shiritori-Github](https://github.com/piijey/shiritori) のしりとり辞書作成・選択フローに準拠）。
 
 ## 必要環境
 
@@ -22,7 +22,7 @@ python -m shiritori_bot.data_prep.setup_all
 | データ | ソース |
 |--------|--------|
 | JMdict / JMnedict | [jmdict-simplified](https://github.com/scriptin/jmdict-simplified) の JSON |
-| 語彙プール | [SudachiDict](https://github.com/WorksApplications/SudachiDict) のCSV（`small_lex` / `core_lex` / `notcore_lex`） |
+| 語彙プール | [SudachiDict](https://github.com/WorksApplications/SudachiDict) の `small_lex.csv`（既定。`--all-lex` で core/notcore も可） |
 
 ## 対戦の始め方
 
@@ -72,14 +72,21 @@ python -m shiritori_bot.main --place --person --ignore-dakuten
 
 Botが受け取った単語に複数読みがある場合は **最初にマッチしたエントリの読み** を採用します。
 
-### Bot語彙のデフォルト禁止
+### Bot語彙（shiritori-Github 準拠）
 
-- 1モーラ（1文字または1文字 + 拗音 / 促音）
-- 「ん」で終わる語
-- ゑ / ゐ など現代50音にない文字
-- 特殊記号を含む読み
-- 助詞・記号などしりとりに不向きな品詞
-- 動詞・形容詞の非終止形（命令形・未然形など）。**終止形のみ**採用
+構築時（`build_vocab_pool`）:
+
+- 既定ソースは `small_lex.csv` のみ
+- 標準カテゴリ `general` は品詞 **`名詞,普通名詞,一般`** のみ（Github の `grep "名詞,普通名詞,一般"` と同趣旨）
+- 表層に英数字が含まれる語は除外（Github 側の形態素解析不一致フィルタの近似）
+- 1モーラ / 「ん」終わり / 旧仮名 / 非かな読みは除外
+- 動詞は `--verb` 時のみ。活用は**終止形のみ**
+
+発話時の選択（`BotWordSelector`）:
+
+1. 要求される先頭モーラで語彙プールを引く
+2. 既出読みを除いた候補から **ランダムに 1 語**（Github の `SystemWordSelector` と同じ）
+3. 候補が無ければ Bot の負け
 
 ## ライセンス
 

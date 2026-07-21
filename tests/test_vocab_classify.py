@@ -1,4 +1,4 @@
-"""Sudachi 品詞分類のテスト."""
+"""Sudachi 品詞分類のテスト (shiritori-Github 準拠の general 定義)."""
 
 from __future__ import annotations
 
@@ -28,13 +28,19 @@ def test_classify_proper():
 
 
 def test_classify_general():
+    # GitHub: 名詞,普通名詞,一般 のみ general
     assert classify_pos("名詞", "普通名詞", "一般", "*") == "general"
     assert classify_pos("動詞", "一般", "*", "*") == "verb"
+    # サ変可能などは general に入れない
+    assert classify_pos("名詞", "普通名詞", "サ変可能", "*") is None
+    assert classify_pos("名詞", "数詞", "*", "*") is None
 
 
 def test_classify_skip():
     assert classify_pos("助詞", "格助詞", "一般", "*") is None
     assert classify_pos("補助記号", "句点", "*", "*") is None
+    assert classify_pos("形容詞", "一般", "*", "*") is None
+    assert classify_pos("副詞", "*", "*", "*") is None
 
 
 def _make_row(
@@ -77,6 +83,10 @@ def test_parse_row_filters():
 
     # 1モーラ → 除外
     assert _parse_row(_make_row("木", "キ")) is None
+
+    # 英数字表層 → 除外 (GitHub の形態素不一致に相当)
+    assert _parse_row(_make_row("1000th", "サウザンス")) is None
+    assert _parse_row(_make_row("CYBER", "サイバー")) is None
 
     # 人名
     r = _parse_row(_make_row("太郎", "タロウ", "名詞", "固有名詞", "人名"))
@@ -139,32 +149,18 @@ def test_parse_row_verb_dictionary_form_only():
         ), c_form
 
 
-def test_parse_row_adjective_dictionary_form_only():
-    r = _parse_row(
-        _make_row(
-            "美しい",
-            "ウツクシイ",
-            "形容詞",
-            "一般",
-            "*",
-            c_type="形容詞",
-            c_form="終止形-一般",
-            norm="美しい",
-        )
-    )
-    assert r is not None
-    assert r[1] == "うつくしい"
-
+def test_parse_row_adjective_excluded():
+    # GitHub しりとり辞書は名詞のみ。形容詞はプールに入れない
     assert (
         _parse_row(
             _make_row(
-                "美しく",
-                "ウツクシク",
+                "美しい",
+                "ウツクシイ",
                 "形容詞",
                 "一般",
                 "*",
                 c_type="形容詞",
-                c_form="連用形-一般",
+                c_form="終止形-一般",
                 norm="美しい",
             )
         )

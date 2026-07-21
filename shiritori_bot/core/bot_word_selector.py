@@ -1,4 +1,15 @@
-"""Bot語彙プールからの候補検索・選択."""
+"""Bot語彙プールからの候補検索・選択.
+
+選択フローは shiritori-Github の ``SystemWordSelector`` に合わせる:
+
+1. 直前語から要求される先頭モーラを決める
+2. しりとり辞書（語彙プール）からその先頭で始まる候補を取る
+3. 候補からランダムに 1 語選ぶ
+4. 候補が無ければ Bot 負け
+
+既出読みの除外は Python 版の対局ルール整合のため維持する
+（GitHub 側は選択時に除外せず、後段バリデーションで弾く）。
+"""
 
 from __future__ import annotations
 
@@ -51,9 +62,13 @@ class VocabPool:
         allowed_categories: list[str],
         used_readings: set[str],
         require_dakuten_match: bool = True,
-        limit: int = 200,
+        limit: int | None = None,
     ) -> list[BotWord]:
-        """first_mora で始まる候補を返す."""
+        """first_mora で始まる候補を返す.
+
+        GitHub の ``shiritoriDictObj[startWith]`` に相当。
+        limit が None のときは該当候補をすべて返す（ランダム選択のため）。
+        """
         if not first_mora:
             return []
 
@@ -68,15 +83,18 @@ class VocabPool:
         if not allowed_categories:
             return []
 
-        rows = self._conn.execute(
-            f"""
+        sql = f"""
             SELECT surface, reading, category, first_mora FROM vocab
             WHERE first_mora IN ({placeholders})
               AND category IN ({cat_ph})
-            LIMIT ?
-            """,
-            (*keys, *allowed_categories, limit * 5),
-        ).fetchall()
+        """
+        params: list = [*keys, *allowed_categories]
+        if limit is not None:
+            # 後段フィルタで落ちる分を見込んで多めに取る
+            sql += " LIMIT ?"
+            params.append(max(limit * 5, limit))
+
+        rows = self._conn.execute(sql, params).fetchall()
 
         results: list[BotWord] = []
         seen: set[str] = set()
@@ -102,7 +120,7 @@ class VocabPool:
                     effective_last_mora=last,
                 )
             )
-            if len(results) >= limit:
+            if limit is not None and len(results) >= limit:
                 break
         return results
 
@@ -170,7 +188,11 @@ class BotWordSelector:
         *,
         rng: random.Random | None = None,
     ) -> BotWord | None:
-        """required_first_mora で始まる語を1つ選ぶ. 無ければ None (Bot負け)."""
+        """required_first_mora で始まる語を1つ選ぶ. 無ければ None (Bot負け).
+
+        shiritori-Github ``SystemWordSelector`` と同じく、
+        候補配列から ``random.choice`` で 1 語を返す。
+        """
         candidates = self.pool.find_candidates(
             required_first_mora,
             allowed_categories=self._allowed_categories(),
@@ -179,5 +201,8 @@ class BotWordSelector:
         )
         if not candidates:
             return None
+        # GitHub:
+        #   randomIndex = Math.floor(Math.random() * arr.length)
+        #   randomWord = arr[randomIndex]
         r = rng or random.Random()
         return r.choice(candidates)
