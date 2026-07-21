@@ -1,6 +1,6 @@
 # しりとり Bot
 
-オフラインで実行可能なしりとり Bot です。相手の入力を **JMdictおよびJMnedict** で存在確認し、Bot の回答語彙は **SudachiDict の small_lex** から構築します（[shiritori-Github](https://github.com/piijey/shiritori) のしりとり辞書作成・選択フローに準拠）。
+オフラインで実行可能なしりとり Bot です。相手の入力を **JMdictおよびJMnedict** で存在確認し、Bot の回答語彙は **SudachiDict の small_lex** から構築します。
 
 ## 必要環境
 
