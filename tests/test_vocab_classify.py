@@ -1,4 +1,4 @@
-"""Sudachi 品詞分類のテスト (shiritori-Github 準拠の general 定義)."""
+"""Sudachi 品詞分類のテスト"""
 
 from __future__ import annotations
 

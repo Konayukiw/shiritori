@@ -1,4 +1,4 @@
-"""BotWordSelector のランダム選択テスト (shiritori-Github 準拠)."""
+"""BotWordSelector のランダム選択テスト"""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def _build_vocab(tmpdir: Path, words: list[tuple[str, str, str]]) -> Path:
 
 
 def test_selects_from_candidates_randomly():
-    """候補からランダムに 1 語を返す (SystemWordSelector 相当)."""
+    """候補からランダムに 1 語を返す"""
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         vocab_path = _build_vocab(
