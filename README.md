@@ -1,6 +1,6 @@
 # しりとり Bot
 
-オフラインで実行可能なしりとり Bot です。相手の入力を **JMdictおよびJMnedict** で存在確認し、Bot の回答語彙は **SudachiDict の small_lex** から構築します。
+オフラインで実行可能なしりとり Bot です。Bot の語彙力は **SudachiDict** を参照します。
 
 ## 必要環境
 
@@ -8,6 +8,13 @@
 - 初回のみネットワークが必要（辞書ダウンロード）
 
 ## セットアップ
+
+- 通常
+
+[最新版しりとりBot](https://github.com/Konayukiw/shiritori/releases/latest) から `ShiritoriBot.exe` をダウンロードして実行するだけ！
+初回起動時は語彙力を身につけるために数分ほどかかることがあります。
+
+- コマンド環境 (CLI) の場合
 
 ```bash
 # ライブラリ
@@ -91,4 +98,4 @@ Botが受け取った単語に複数読みがある場合は **最初にマッ�
 - JMdict / JMnedict は [EDRDG License](http://www.edrdg.org/edrdg/licence.html) に従います
 - SudachiDict は Apache-2.0（UniDic / NEologd 由来部分を含む）です
 
-本リポジトリには辞書本体は同梱しません。セットアップに従い、初回利用時にダウンロードしてください。
+本リポジトリには辞書本体は同梱しません。上記セットアップに従えば、最新版が自動でダウンロードされます。
