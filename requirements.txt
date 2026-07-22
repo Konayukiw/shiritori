@@ -1,1 +1,4 @@
 jaconv>=0.3.4
+flet>=0.86.1
+flet-desktop>=0.86.1
+pyinstaller>=6.0

@@ -38,7 +38,7 @@ class JmdictIndex:
                 f"JMdict DB が見つかりません: {self.db_path}\n"
                 "先に `python -m shiritori_bot.data_prep.build_jmdict_index` を実行してください。"
             )
-        self._conn = sqlite3.connect(f"file:{self.db_path.as_posix()}?mode=ro", uri=True)
+        self._conn = sqlite3.connect(f"file:{self.db_path.as_posix()}?mode=ro", uri=True, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
 
     def close(self) -> None:

@@ -10,10 +10,13 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "jaconv>=0.3.4",
+    "flet>=0.86.1",
+    "flet-desktop>=0.86.1",
 ]
 
 [project.scripts]
 shiritori-bot = "shiritori_bot.main:main"
+shiritori-gui = "shiritori_bot.gui.app:main"
 
 [tool.setuptools.packages.find]
 include = ["shiritori_bot*"]

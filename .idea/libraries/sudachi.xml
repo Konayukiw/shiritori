@@ -1,0 +1,11 @@
+<component name="libraryTable">
+  <library name="sudachi">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/data/raw/sudachi/notcore_lex.zip!/" />
+      <root url="jar://$PROJECT_DIR$/data/raw/sudachi/small_lex.zip!/" />
+      <root url="jar://$PROJECT_DIR$/data/raw/sudachi/core_lex.zip!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>

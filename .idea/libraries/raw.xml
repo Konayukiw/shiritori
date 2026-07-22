@@ -1,0 +1,10 @@
+<component name="libraryTable">
+  <library name="raw">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/data/raw/jmnedict-all-3.6.2%2B20260720135044.json.zip!/" />
+      <root url="jar://$PROJECT_DIR$/data/raw/jmdict-eng-3.6.2%2B20260720135044.json.zip!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>
