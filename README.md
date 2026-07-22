@@ -12,6 +12,7 @@
 - 通常
 
 [最新版しりとりBot](https://github.com/Konayukiw/shiritori/releases/latest) から `ShiritoriBot.exe` をダウンロードして実行するだけ！
+
 初回起動時は語彙力を身につけるために数分ほどかかることがあります。
 
 - コマンド環境 (CLI) の場合
