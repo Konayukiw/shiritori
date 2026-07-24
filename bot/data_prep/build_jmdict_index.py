@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from bot.config import DEFAULT_CACHE_DIR, DEFAULT_RAW_DIR, JMDICT_DB_NAME
-from bot.core.kana_utils import normalize_reading, to_hiragana
+from bot.utils.kana_utils import normalize_reading, to_hiragana
 from bot.data_prep.download import download_jmdict
 
 

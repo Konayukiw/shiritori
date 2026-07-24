@@ -5,9 +5,9 @@ import sys
 from pathlib import Path
 
 from bot.config import GameConfig, default_config
-from bot.core.bot_word_selector import BotWordSelector, VocabPool
-from bot.core.opponent_word_validator import JmdictIndex, OpponentWordValidator
-from bot.game.session import GameState
+from bot.utils.vocabs import BotWordSelector, VocabPool
+from bot.utils.validator import JmdictIndex, OpponentWordValidator
+from bot.manager.session import GameState
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

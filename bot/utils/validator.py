@@ -6,12 +6,12 @@ from pathlib import Path
 from typing import Optional
 
 from bot.config import GameConfig
-from bot.core.kana_utils import (
+from bot.utils.kana_utils import (
     is_allowed_surface,
     normalize_reading,
     to_hiragana,
 )
-from bot.core.rules import (
+from bot.utils.rules import (
     check_default_bans,
     effective_last_mora,
     ends_with_n,

@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from bot.config import GameConfig
-from bot.core.kana_utils import strip_dakuten
-from bot.core.rules import effective_last_mora, mora_matches
+from bot.utils.kana_utils import strip_dakuten
+from bot.utils.rules import effective_last_mora, mora_matches
 
 
 @dataclass

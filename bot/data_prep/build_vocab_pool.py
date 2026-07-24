@@ -6,14 +6,14 @@ import sys
 from pathlib import Path
 
 from bot.config import DEFAULT_CACHE_DIR, DEFAULT_RAW_DIR, VOCAB_DB_NAME
-from bot.core.kana_utils import (
+from bot.utils.kana_utils import (
     contains_obsolete_kana,
     is_allowed_surface,
     is_kana_only_reading,
     normalize_reading,
     to_hiragana,
 )
-from bot.core.rules import (
+from bot.utils.rules import (
     effective_first_mora,
     ends_with_n,
     is_one_mora_word,

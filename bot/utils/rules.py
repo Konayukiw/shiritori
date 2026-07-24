@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bot.core.kana_utils import (
+from bot.utils.kana_utils import (
     contains_obsolete_kana,
     is_kana_only_reading,
     strip_dakuten,

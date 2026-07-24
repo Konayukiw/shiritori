@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from bot.config import GameConfig
-from bot.core.rules import effective_last_mora
+from bot.utils.rules import effective_last_mora
 
 
 @dataclass
