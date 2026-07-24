@@ -9,11 +9,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from shiritori_bot.config import GameConfig
-from shiritori_bot.core.bot_word_selector import BotWordSelector, VocabPool
-from shiritori_bot.core.opponent_word_validator import JmdictIndex, OpponentWordValidator
-from shiritori_bot.core.rules import effective_first_mora, effective_last_mora
-from shiritori_bot.game.session import GameState
+from bot.config import GameConfig
+from bot.core.bot_word_selector import BotWordSelector, VocabPool
+from bot.core.opponent_word_validator import JmdictIndex, OpponentWordValidator
+from bot.core.rules import effective_first_mora, effective_last_mora
+from bot.game.session import GameState
 
 
 def _build_mock_dbs(tmpdir: Path) -> tuple[Path, Path]:

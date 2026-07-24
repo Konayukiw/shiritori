@@ -8,14 +8,14 @@ from pathlib import Path
 # プロジェクトルートを path に追加
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from shiritori_bot.core.kana_utils import (
+from bot.core.kana_utils import (
     contains_obsolete_kana,
     is_allowed_surface,
     normalize_reading,
     strip_dakuten,
     to_hiragana,
 )
-from shiritori_bot.core.rules import (
+from bot.core.rules import (
     check_default_bans,
     effective_first_mora,
     effective_last_mora,

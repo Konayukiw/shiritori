@@ -1,4 +1,4 @@
-__pycache__/
+__pycache__/*
 *.py[cod]
 *.egg-info/
 .venv/
@@ -6,9 +6,11 @@ venv/
 dist/
 build/
 .pytest_cache/
-tests/
+tests/*
 
 data/raw/
 data/cache/
 *.sqlite3
 *.db
+shiritori_bot/*
+shiritori_bot.egg-info/*

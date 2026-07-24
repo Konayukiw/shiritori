@@ -10,9 +10,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from shiritori_bot.config import GameConfig
-from shiritori_bot.core.bot_word_selector import BotWordSelector, VocabPool
-from shiritori_bot.core.rules import effective_first_mora
+from bot.config import GameConfig
+from bot.core.bot_word_selector import BotWordSelector, VocabPool
+from bot.core.rules import effective_first_mora
 
 
 def _build_vocab(tmpdir: Path, words: list[tuple[str, str, str]]) -> Path:

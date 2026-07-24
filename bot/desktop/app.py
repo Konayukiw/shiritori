@@ -12,17 +12,17 @@ from pathlib import Path
 
 import flet as ft
 
-from shiritori_bot.config import GameConfig, default_config
-from shiritori_bot.core.bot_word_selector import BotWordSelector, VocabPool
-from shiritori_bot.core.kana_utils import (
+from bot.config import GameConfig, default_config
+from bot.core.bot_word_selector import BotWordSelector, VocabPool
+from bot.core.kana_utils import (
     contains_obsolete_kana,
     is_allowed_surface,
     is_kana_only_reading,
     normalize_reading,
     to_hiragana,
 )
-from shiritori_bot.core.opponent_word_validator import JmdictIndex, OpponentWordValidator
-from shiritori_bot.core.rules import (
+from bot.core.opponent_word_validator import JmdictIndex, OpponentWordValidator
+from bot.core.rules import (
     check_default_bans,
     effective_first_mora,
     effective_last_mora,
@@ -30,7 +30,7 @@ from shiritori_bot.core.rules import (
     is_one_mora_word,
     mora_matches,
 )
-from shiritori_bot.game.session import GameState
+from bot.game.session import GameState
 
 _USER_DATA_DIR = Path.home() / ".shiritori-bot"
 _USER_CACHE_DIR = _USER_DATA_DIR / "data" / "cache"

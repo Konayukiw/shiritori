@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from shiritori_bot.data_prep.build_vocab_pool import classify_pos, _parse_row
+from bot.data_prep.build_vocab_pool import classify_pos, _parse_row
 
 
 def test_classify_person():
