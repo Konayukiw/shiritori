@@ -4,8 +4,9 @@
 
 ## 必要環境
 
-- Python 3.10+
+- Python 3.10+（CLI / Desktop / ローカル Web サーバ）
 - 初回のみネットワークが必要（辞書ダウンロード）
+- Web 版（GitHub Pages）はブラウザのみで動作（静的 HTML/JS）
 
 ## 使い方
 
@@ -13,6 +14,30 @@
 
 初回起動時は語彙力を身につけるために数分ほどかかることがあります。
 
+## 使い方 (Web / GitHub Pages)
+
+Web 版は **Python サーバ不要** の静的サイトです。対局ロジックはブラウザ上の JavaScript で動き、語彙は **原本の SudachiDict / JMdict / JMnedict** を直接読み込みます（CLI/Desktop が使う SQLite 語彙プールは使いません）。
+
+### GitHub Pages
+
+1. リポジトリの **Settings → Pages → Build and deployment** で Source を **GitHub Actions** にする
+2. `main` への push、または Actions の **Deploy GitHub Pages** を手動実行
+3. ワークフローが原本辞書（`small_lex.zip` / `jmdict-eng.json.zip` / `jmnedict-all.json.zip`）を取得してサイトに同梱し、デプロイする
+
+初回アクセス時は辞書の展開・インデックス構築に時間がかかります。2 回目以降はブラウザの IndexedDB キャッシュを使います。
+
+### ローカルで Web 版を試す
+
+```bash
+# 原本辞書を data/raw に取得（未取得の場合）
+python -m bot.data_prep.download
+
+# bot/web を配信し、原本を bot/web/dicts/ に公開
+python -m bot.web.main
+# → http://127.0.0.1:8000/
+```
+
+`bot/web/dicts/` に置くファイルの説明は [`bot/web/dicts/README.md`](bot/web/dicts/README.md) を参照してください。
 
 ## 使い方 (CLI)
 

@@ -11,3 +11,8 @@ data/raw/
 data/cache/
 *.sqlite3
 *.db
+
+# Original dicts mirrored for local web serving (Pages deploys them in CI)
+bot/web/dicts/*
+!bot/web/dicts/.gitkeep
+!bot/web/dicts/README.md

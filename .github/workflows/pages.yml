@@ -1,0 +1,113 @@
+name: Deploy GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare dicts directory
+        run: mkdir -p bot/web/dicts
+
+      - name: Download SudachiDict small_lex (original)
+        env:
+          SUDACHI_RELEASE: "20260428"
+        run: |
+          curl -fsSL \
+            "http://sudachi.s3-website-ap-northeast-1.amazonaws.com/sudachidict-raw/${SUDACHI_RELEASE}/small_lex.zip" \
+            -o bot/web/dicts/small_lex.zip
+          ls -lh bot/web/dicts/small_lex.zip
+
+      - name: Download JMdict / JMnedict originals (jmdict-simplified)
+        run: |
+          python3 <<'PY'
+          import json, re, urllib.request
+          from pathlib import Path
+
+          api = "https://api.github.com/repos/scriptin/jmdict-simplified/releases/latest"
+          req = urllib.request.Request(api, headers={"User-Agent": "shiritori-bot-pages"})
+          with urllib.request.urlopen(req, timeout=60) as resp:
+              data = json.loads(resp.read().decode())
+
+          assets = {a["name"]: a["browser_download_url"] for a in data.get("assets", [])}
+          out = Path("bot/web/dicts")
+
+          def pick(pattern: str) -> tuple[str, str]:
+              cands = [
+                  (n, u) for n, u in assets.items()
+                  if re.match(pattern, n) and "common" not in n and "examples" not in n
+              ]
+              if not cands:
+                  raise SystemExit(f"no asset matching {pattern}")
+              cands.sort(key=lambda x: x[0])
+              return cands[-1]
+
+          mapping = {
+              "jmdict-eng.json.zip": r"^jmdict-eng-\d.+\.json\.zip$",
+              "jmnedict-all.json.zip": r"^jmnedict-all-\d.+\.json\.zip$",
+          }
+          for dest_name, pat in mapping.items():
+              name, url = pick(pat)
+              dest = out / dest_name
+              print(f"Downloading {name} -> {dest}")
+              req = urllib.request.Request(url, headers={"User-Agent": "shiritori-bot-pages"})
+              with urllib.request.urlopen(req, timeout=600) as resp, open(dest, "wb") as f:
+                  while True:
+                      chunk = resp.read(1024 * 256)
+                      if not chunk:
+                          break
+                      f.write(chunk)
+              print(f"  size={dest.stat().st_size}")
+          PY
+
+      - name: Write dicts manifest
+        run: |
+          python3 <<'PY'
+          import json, time
+          from pathlib import Path
+          d = Path("bot/web/dicts")
+          files = {
+              p.name: p.stat().st_size
+              for p in sorted(d.iterdir())
+              if p.is_file() and p.name not in {".gitkeep", "README.md"}
+          }
+          (d / "manifest.json").write_text(
+              json.dumps({"built_at": time.time(), "files": files}, indent=2),
+              encoding="utf-8",
+          )
+          print(files)
+          PY
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: bot/web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
