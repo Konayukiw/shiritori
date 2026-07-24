@@ -180,7 +180,7 @@ function submitWord(word) {
 }
 
 async function bootstrap() {
-  setSetupMsg("原本辞書を準備しています…");
+  setSetupMsg("語彙力の準備中…");
   try {
     const dicts = await loadDictionaries(setSetupMsg, {
       includeJmnedict: true,
@@ -198,7 +198,7 @@ async function bootstrap() {
     setupDone = true;
     els.setupOverlay.classList.add("hidden");
     setInputEnabled(true);
-    log("システム", "しりとり Bot へようこそ！");
+    log("システム", "しりとりBot へようこそ！");
     log(
       "システム",
       dicts.fromCache
@@ -214,7 +214,7 @@ async function bootstrap() {
       "セットアップに失敗しました。\n\n" +
         (e && e.message ? e.message : String(e)) +
         "\n\nローカル: python -m bot.web.main\n" +
-        "GitHub Pages: Actions の pages ワークフローで dicts/ を同梱してください。"
+        "GitHub Pagesの場合、ActionsからPagesワークフローで dicts/ を同梱する必要があります。"
     );
     els.setupOverlay.querySelector(".spinner")?.classList.add("hidden");
   }
