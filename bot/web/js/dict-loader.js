@@ -41,7 +41,7 @@ async function tryFetch(urls, options) {
       lastErr = e;
     }
   }
-  throw lastErr || new Error("すべての URL の取得に失敗しました");
+  throw lastErr || new Error("URLの取得に失敗しました");
 }
 
 function unzipFirst(arrayBuffer, { preferExt = null } = {}) {
@@ -155,7 +155,7 @@ function mapsFromSerializable(data) {
 }
 
 async function resolveJmdictAssetUrls(log) {
-  log("最新の JMdict / JMnedict リリースを確認中…");
+  log("JMdict / JMnedictの最新バージョンを確認中…");
   const release = await fetchOk(DICT_SOURCES.jmdictApi, { as: "json" });
   const assets = {};
   for (const a of release.assets || []) {
@@ -170,7 +170,7 @@ async function resolveJmdictAssetUrls(log) {
         !name.includes("examples")
     );
     if (!candidates.length) {
-      throw new Error(`リリースに ${key} の zip が見つかりません`);
+      throw new Error(`リリースに ${key} の zipファイルが見つかりません`);
     }
     candidates.sort((a, b) => (a[0] < b[0] ? -1 : 1));
     const [name, url] = candidates[candidates.length - 1];
@@ -211,7 +211,7 @@ export function buildVocabFromSudachiCsv(csvText, log = () => {}) {
 
   const lines = csvText.split(/\r?\n/);
   const totalLines = lines.length;
-  log(`SudachiDict を解析中… (${totalLines.toLocaleString()} 行)`);
+  log(`SudachiDictを解析中… (${totalLines.toLocaleString()} 行)`);
 
   for (const line of lines) {
     lineNo += 1;
@@ -341,7 +341,7 @@ async function loadSudachiOriginal(log) {
   const remoteZip = `${DICT_SOURCES.sudachiBase}/${DICT_SOURCES.sudachiRelease}/${DICT_SOURCES.sudachiFile}`;
 
   try {
-    log("SudachiDict (small_lex) を取得中…");
+    log("SudachiDictからファイルを取得中…");
     const { url, data } = await tryFetch(
       [local.sudachiZip, remoteZip, local.sudachiCsv],
       { as: "arrayBuffer" }
@@ -356,10 +356,7 @@ async function loadSudachiOriginal(log) {
     }
     return buildVocabFromSudachiCsv(csvText, log);
   } catch (e) {
-    throw new Error(
-      `SudachiDict の取得に失敗しました: ${e.message}\n` +
-        "GitHub Pages では ./dicts/small_lex.zip を配置するか、Actions デプロイを利用してください。"
-    );
+    throw new Error(`SudachiDict の取得に失敗しました: ${e.message}\n`);
   }
 }
 
@@ -371,7 +368,7 @@ async function loadJmdictOriginal(log, { includeJmnedict = true } = {}) {
   let sourceTag = "local";
 
   try {
-    log("JMdict を取得中…");
+    log("JMdictからファイルを取得中…");
     try {
       const { url, data } = await tryFetch([local.jmdictZip], { as: "arrayBuffer" });
       log(`  取得元: ${url}`);
@@ -385,38 +382,35 @@ async function loadJmdictOriginal(log, { includeJmnedict = true } = {}) {
   } catch {
     const urls = await resolveJmdictAssetUrls(log);
     sourceTag = urls.tag;
-    log("JMdict (リモート) を取得中…");
+    log("JMdictからファイルを取得中…");
     try {
       const buf = await fetchOk(urls.jmdict, { as: "arrayBuffer" });
       log("  zip を展開中…");
       jmdictData = unzipToJson(buf).data;
     } catch (e) {
-      throw new Error(
-        `JMdict の取得に失敗しました: ${e.message}\n` +
-          "GitHub Pages では ./dicts/jmdict-eng.json.zip を配置するか、Actions デプロイを利用してください。"
-      );
+      throw new Error(`JMdictからのファイルの取得に失敗しました: ${e.message}\n`);
     }
     if (includeJmnedict) {
-      log("JMnedict (リモート) を取得中…");
+      log("JMnedictからファイルを取得中…");
       try {
         const buf = await fetchOk(urls.jmnedict, { as: "arrayBuffer" });
         log("  zip を展開中…");
         jmnedictData = unzipToJson(buf).data;
       } catch (e) {
-        log(`  JMnedict スキップ: ${e.message}`);
+        log(`  JMnedictからのファイルの取得をスキップ: ${e.message}`);
       }
     }
   }
 
   if (jmdictData && includeJmnedict && !jmnedictData) {
     try {
-      log("JMnedict を取得中…");
+      log("JMnedictからファイルを取得中…");
       try {
         const { url, data } = await tryFetch([local.jmnedictZip], {
           as: "arrayBuffer",
         });
         log(`  取得元: ${url}`);
-        log("  zip を展開中…");
+        log("  zipファイルを展開中…");
         jmnedictData = unzipToJson(data).data;
       } catch {
         const { url, data } = await tryFetch([local.jmnedictJson], {
@@ -426,11 +420,11 @@ async function loadJmdictOriginal(log, { includeJmnedict = true } = {}) {
         jmnedictData = JSON.parse(strFromU8(new Uint8Array(data)));
       }
     } catch (e) {
-      log(`  JMnedict スキップ: ${e.message}`);
+      log(`  JMnedictからのファイルの取得をスキップ: ${e.message}`);
     }
   }
 
-  log("JMdict インデックスを構築中…");
+  log("JMdictインデックスを構築中…");
   const maps = buildJmdictMaps(
     jmdictData.words || [],
     jmnedictData ? jmnedictData.words || [] : null
@@ -463,7 +457,7 @@ export async function loadDictionaries(log = () => {}, options = {}) {
     }
   }
 
-  log("原本辞書ファイルを読み込みます (SudachiDict / JMdict / JMnedict)…");
+  log("語彙を読み込み中…");
 
   const jm = await loadJmdictOriginal(log, { includeJmnedict });
   const vocab = await loadSudachiOriginal(log);

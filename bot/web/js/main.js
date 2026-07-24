@@ -203,9 +203,9 @@ async function bootstrap() {
       "システム",
       dicts.fromCache
         ? "キャッシュ済みの語彙で開始します。"
-        : "SudachiDict / JMdict / JMnedict を読み込みました。"
+        : "語彙を読み込みました。"
     );
-    log("システム", "好きな単語を入力して遊んでください。");
+    log("システム", "好きな単語を入力して対戦を始めてください。");
     updateStatus();
     els.wordInput.focus();
   } catch (e) {

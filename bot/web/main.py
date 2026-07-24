@@ -1,15 +1,3 @@
-"""Static web server for the browser shiritori bot.
-
-GitHub Pages hosts the static files under ``bot/web/`` as-is.
-This module is only for local development: it serves the static UI and
-exposes original SudachiDict / JMdict / JMnedict files under ``/dicts/``.
-
-Usage::
-
-    python -m bot.web.main
-    # open http://127.0.0.1:8000/
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -84,7 +72,6 @@ def ensure_dict_links(raw_dir: Path | None = None) -> None:
         try:
             if dest.exists() or dest.is_symlink():
                 dest.unlink()
-            # Prefer hardlink/symlink to avoid duplicating large files.
             try:
                 os.link(src, dest)
                 print(f"  link  {dest_name} <- {src}")
@@ -104,7 +91,6 @@ class QuietHandler(http.server.SimpleHTTPRequestHandler):
         super().__init__(*args, directory=directory, **kwargs)
 
     def end_headers(self) -> None:
-        # Allow module scripts and local tooling; harmless for local dev.
         self.send_header("Cache-Control", "no-cache")
         super().end_headers()
 
@@ -113,14 +99,14 @@ class QuietHandler(http.server.SimpleHTTPRequestHandler):
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="しりとり Bot Web (static)")
+    parser = argparse.ArgumentParser(description="しりとりBot Web")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
         "--raw-dir",
         type=Path,
         default=None,
-        help="Original dict files (default: <project>/data/raw)",
+        help="Original dict files (/data/raw)",
     )
     parser.add_argument(
         "--skip-dicts",
@@ -130,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if not args.skip_dicts:
-        print("原本辞書を bot/web/dicts/ に公開します…")
+        print("語彙を bot/web/dicts/ にアップロード中...")
         ensure_dict_links(args.raw_dir)
         present = sorted(p.name for p in DICTS_DIR.iterdir() if p.is_file() and p.name != ".gitkeep")
         if present:
