@@ -1,5 +1,3 @@
-/** IndexedDB cache for parsed dictionary indexes (derived from originals). */
-
 const DB_NAME = "shiritori-bot-web";
 const DB_VERSION = 1;
 const STORE = "dict-cache";
@@ -42,7 +40,6 @@ export async function cacheSet(key, value) {
       tx.onerror = () => reject(tx.error);
     });
   } catch {
-    // Quota / private mode — ignore; in-memory indexes still work.
   }
 }
 

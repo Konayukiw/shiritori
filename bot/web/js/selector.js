@@ -1,5 +1,3 @@
-/** Bot word selection from SudachiDict-derived pool (port of bot/utils/vocabs.py) */
-
 import { stripDakuten } from "./kana.js";
 import { effectiveLastMora, moraMatches } from "./rules.js";
 

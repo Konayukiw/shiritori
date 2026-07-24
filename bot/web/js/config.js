@@ -1,5 +1,3 @@
-/** Game configuration */
-
 export function defaultConfig() {
   return {
     allowPerson: false,
@@ -47,20 +45,13 @@ export function jmnedictAllowed(config) {
   );
 }
 
-/** Dictionary source configuration for browser / GitHub Pages. */
 export const DICT_SOURCES = {
-  /** Pinned SudachiDict raw release (same as desktop/cli download.py). */
   sudachiRelease: "20260428",
   sudachiFile: "small_lex.zip",
   sudachiBase:
     "http://sudachi.s3-website-ap-northeast-1.amazonaws.com/sudachidict-raw",
-  /** jmdict-simplified GitHub releases API (CORS-enabled). */
   jmdictApi:
     "https://api.github.com/repos/scriptin/jmdict-simplified/releases/latest",
-  /**
-   * Same-origin originals (preferred).
-   * Populated by GitHub Actions for Pages, or by local `python -m bot.web.main`.
-   */
   local: {
     sudachiZip: "./dicts/small_lex.zip",
     sudachiCsv: "./dicts/small_lex.csv",

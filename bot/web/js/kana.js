@@ -1,5 +1,3 @@
-/** Kana / surface utilities (port of bot/utils/kana_utils.py) */
-
 export const MODERN_HIRAGANA = new Set(
   "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをん" +
     "がぎぐげござじずぜぞだぢづでどばびぶべぼぱぴぷぺぽ" +
@@ -20,12 +18,10 @@ const DAKUTEN_STRIP = {
   ゔ: "う",
 };
 
-/** Katakana → Hiragana */
 export function toHiragana(text) {
   let out = "";
   for (const ch of text) {
     const code = ch.codePointAt(0);
-    // ァ-ン → ぁ-ん
     if (code >= 0x30a1 && code <= 0x30f6) {
       out += String.fromCodePoint(code - 0x60);
     } else if (ch === "ヵ") {

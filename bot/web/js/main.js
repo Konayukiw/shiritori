@@ -1,7 +1,3 @@
-/**
- * しりとり Bot — static web client (GitHub Pages compatible)
- */
-
 import { defaultConfig } from "./config.js";
 import { GameState } from "./game.js";
 import { loadDictionaries } from "./dict-loader.js";
@@ -224,7 +220,6 @@ async function bootstrap() {
   }
 }
 
-// Events
 els.wordInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
     e.preventDefault();

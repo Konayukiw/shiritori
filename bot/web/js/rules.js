@@ -1,5 +1,3 @@
-/** Shiritori rule helpers (port of bot/utils/rules.py) */
-
 import {
   containsObsoleteKana,
   isKanaOnlyReading,

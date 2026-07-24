@@ -1,5 +1,3 @@
-/** Opponent word validator (port of bot/utils/validator.py) */
-
 import {
   isAllowedSurface,
   normalizeReading,

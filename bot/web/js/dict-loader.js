@@ -1,12 +1,3 @@
-/**
- * Load original SudachiDict / JMdict / JMnedict files in the browser.
- *
- * Does NOT use pre-built vocab_pool.sqlite3 / jmdict.sqlite3.
- * Sources (in priority order):
- *   1. Same-origin ./dicts/ (GitHub Pages deploy or local server)
- *   2. Official remote URLs (when CORS allows)
- */
-
 import { unzipSync, strFromU8 } from "https://cdn.jsdelivr.net/npm/fflate@0.8.2/esm/browser.js";
 
 import { DICT_SOURCES } from "./config.js";
@@ -75,8 +66,6 @@ function unzipToJson(arrayBuffer) {
   return { name, data: JSON.parse(text) };
 }
 
-/* ---------- JMdict / JMnedict ---------- */
-
 function* iterWordPairs(words, source) {
   for (const word of words) {
     const kanjiList = word.kanji || [];
@@ -112,7 +101,6 @@ function* iterWordPairs(words, source) {
 }
 
 /**
- * Prefer jmdict over jmnedict when the same surface/reading is first seen.
  * @returns {{ bySurface: Map<string, object>, byReading: Map<string, object>, count: number }}
  */
 export function buildJmdictMaps(jmdictWords, jmnedictWords = null) {
@@ -197,8 +185,6 @@ async function resolveJmdictAssetUrls(log) {
   };
 }
 
-/* ---------- SudachiDict ---------- */
-
 function classifyPos(pos1, pos2, pos3) {
   if (pos1 === "名詞") {
     if (pos2 === "固有名詞") {
@@ -215,7 +201,6 @@ function classifyPos(pos1, pos2, pos3) {
   return null;
 }
 
-/** Parse SudachiDict CSV text into first_mora → entries map. */
 export function buildVocabFromSudachiCsv(csvText, log = () => {}) {
   /** @type {Map<string, Array<{surface:string, reading:string, category:string}>>} */
   const byFirstMora = new Map();
@@ -224,7 +209,6 @@ export function buildVocabFromSudachiCsv(csvText, log = () => {}) {
   let skipped = 0;
   let lineNo = 0;
 
-  // Handle both \n and \r\n; Sudachi CSV has no header.
   const lines = csvText.split(/\r?\n/);
   const totalLines = lines.length;
   log(`SudachiDict を解析中… (${totalLines.toLocaleString()} 行)`);
@@ -232,7 +216,6 @@ export function buildVocabFromSudachiCsv(csvText, log = () => {}) {
   for (const line of lines) {
     lineNo += 1;
     if (!line) continue;
-    // Simple CSV split — Sudachi lex fields do not contain unescaped commas in practice for these columns.
     const row = parseCsvLine(line);
     if (row.length < 12) {
       skipped += 1;
@@ -352,13 +335,11 @@ function vocabFromSerializable(entries) {
   return new Map(entries);
 }
 
-/* ---------- High-level load ---------- */
 
 async function loadSudachiOriginal(log) {
   const local = DICT_SOURCES.local;
   const remoteZip = `${DICT_SOURCES.sudachiBase}/${DICT_SOURCES.sudachiRelease}/${DICT_SOURCES.sudachiFile}`;
 
-  // Prefer zip (smaller transfer). CSV is a local fallback only.
   try {
     log("SudachiDict (small_lex) を取得中…");
     const { url, data } = await tryFetch(
@@ -389,7 +370,6 @@ async function loadJmdictOriginal(log, { includeJmnedict = true } = {}) {
   let jmnedictData = null;
   let sourceTag = "local";
 
-  // Local originals first (zip preferred over raw JSON).
   try {
     log("JMdict を取得中…");
     try {
@@ -403,8 +383,6 @@ async function loadJmdictOriginal(log, { includeJmnedict = true } = {}) {
       jmdictData = JSON.parse(strFromU8(new Uint8Array(data)));
     }
   } catch {
-    // Remote: resolve latest release asset URLs (API has CORS; asset download often does not).
-    // Still attempt — some environments / mirrors may allow it.
     const urls = await resolveJmdictAssetUrls(log);
     sourceTag = urls.tag;
     log("JMdict (リモート) を取得中…");
@@ -462,7 +440,6 @@ async function loadJmdictOriginal(log, { includeJmnedict = true } = {}) {
 }
 
 /**
- * Load dictionaries from original files (with IndexedDB cache of derived indexes).
  * @param {LogFn} log
  * @param {{ forceReload?: boolean, includeJmnedict?: boolean }} [options]
  */
@@ -491,7 +468,6 @@ export async function loadDictionaries(log = () => {}, options = {}) {
   const jm = await loadJmdictOriginal(log, { includeJmnedict });
   const vocab = await loadSudachiOriginal(log);
 
-  // Persist compact derived indexes (still built from originals each cold start if cache cleared).
   log("ブラウザキャッシュに保存中…");
   await cacheSet(cacheKey, {
     sourceTag: jm.sourceTag,

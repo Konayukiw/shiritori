@@ -1,5 +1,3 @@
-/** Game state (port of bot/manager/session.py) */
-
 import { effectiveLastMora } from "./rules.js";
 
 export class GameState {
