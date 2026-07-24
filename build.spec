@@ -90,7 +90,7 @@ hiddenimports = sorted(
 )
 
 a = Analysis(
-    ["shiritori_bot/gui/app.py"],
+    ["bot/desktop/main.py"],
     pathex=[str(PROJECT_ROOT)],
     binaries=[],
     datas=flet_datas + flet_desktop_datas + extra_datas,

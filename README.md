@@ -23,13 +23,13 @@
 pip install -r requirements.txt
 
 # 辞書ダウンロード + SQLiteインデックス構築（初回のみ必要）
-python -m shiritori_bot.data_prep.setup_all
+python -m bot.data_prep.setup_all
 ```
 
 - Botの起動
 
 ```bash
-python -m shiritori_bot.main
+python -m bot.cli.main
 ```
 
 ### オプション
@@ -52,7 +52,7 @@ python -m shiritori_bot.main
 
 ```bash
 # 地名・人名も OK、濁点は無視
-python -m shiritori_bot.main --place --person --ignore-dakuten
+python -m bot.cli.main --place --person --ignore-dakuten
 ```
 
 ### 対局中に使えるコマンド
