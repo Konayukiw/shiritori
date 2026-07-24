@@ -102,8 +102,6 @@ Botが受け取った単語に複数読みがある場合は **最初にマッ�
 ### SudachiDict
 **[Sudachi LICENSE-2.0](https://github.com/WorksApplications/SudachiDict/blob/develop/LICENSE-2.0.txt)**
 
-- SudachiDict by Works Applications Co., Ltd. is licensed under the Apache License, Version 2.0.
-Copyright (c) 2017-2023 Works Applications Co., Ltd.
 - **License**: Apache License 2.0
 - **Copyright**: © 2017-2023 Works Applications Co., Ltd.
 
