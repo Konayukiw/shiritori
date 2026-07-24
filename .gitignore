@@ -6,11 +6,8 @@ venv/
 dist/
 build/
 .pytest_cache/
-tests/
 
 data/raw/
 data/cache/
 *.sqlite3
 *.db
-shiritori_bot/*
-shiritori_bot.egg-info/*
