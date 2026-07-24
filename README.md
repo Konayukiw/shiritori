@@ -7,14 +7,16 @@
 - Python 3.10+
 - 初回のみネットワークが必要（辞書ダウンロード）
 
-## セットアップ
+## 使い方
 
 [最新版しりとりBot](https://github.com/Konayukiw/shiritori/releases/latest) から `ShiritoriBot.exe` をダウンロードして実行するだけ！
 
 初回起動時は語彙力を身につけるために数分ほどかかることがあります。
 
 
-- コマンド環境 (CLI) の場合
+## 使い方 (CLI)
+
+- 環境構築
 
 ```bash
 # ライブラリ
@@ -24,14 +26,7 @@ pip install -r requirements.txt
 python -m shiritori_bot.data_prep.setup_all
 ```
 
-取得元:
-
-| データ | ソース |
-|--------|--------|
-| JMdict / JMnedict | [jmdict-simplified](https://github.com/scriptin/jmdict-simplified) の JSON |
-| 語彙プール | [SudachiDict](https://github.com/WorksApplications/SudachiDict) の `small_lex.csv`（既定。`--all-lex` で core/notcore も可） |
-
-## 対戦の始め方
+- Botの起動
 
 ```bash
 python -m shiritori_bot.main
@@ -72,7 +67,7 @@ python -m shiritori_bot.main --place --person --ignore-dakuten
 ### 単語の検証
 
 1. 文字種チェック（ひらがな / カタカナ / 漢字、任意で英数字）
-2. **JMdict** で存在確認 → なければ **JMnedict**
+2. **JMdict** および **JMnedict**で存在確認
 3. どちらにも無ければ知らない単語とみなす
 4. 尻を取れているか、既出でないか、1モーラ（1文字または1文字 + 拗音 / 促音）禁止、現代仮名遣いかどうか、オプションに従っているか
 5. 「ん」で終わる場合 → 即負け
@@ -81,13 +76,13 @@ Botが受け取った単語に複数読みがある場合は **最初にマッ�
 
 ### Bot語彙
 
-- 既定ソースは `small_lex.csv`
+- 語彙は **SudachiDict** より参照
 - 標準カテゴリ `general` は品詞 **`名詞,普通名詞,一般`** のみ
 - 表層に英数字が含まれる語は除外（形態素解析不一致フィルタの近似）
 - 1モーラ / 「ん」終わり / 旧仮名 / 非かな読みは除外
 - 動詞は `--verb` 時のみ。活用は**終止形のみ**
 
-発話時の選択（`BotWordSelector`）:
+発話時の選択:
 
 1. 要求される先頭モーラで語彙プールを引く
 2. 既出読みを除いた候補から **ランダムに 1 語**
@@ -95,7 +90,25 @@ Botが受け取った単語に複数読みがある場合は **最初にマッ�
 
 ## ライセンス
 
-- JMdict / JMnedict は [EDRDG License](http://www.edrdg.org/edrdg/licence.html) に従います
-- SudachiDict は Apache-2.0（UniDic / NEologd 由来部分を含む）です
+- しりとり Botは **JMdict**、**JMnedict**、**SudachiDict** を使用します。
 
-本リポジトリには辞書本体は同梱しません。上記セットアップに従えば、最新版が自動でダウンロードされます。
+使用するファイル:
+
+| データ | ソース |
+|--------|--------|
+| JMdict / JMnedict | [jmdict-simplified](https://github.com/scriptin/jmdict-simplified) の JSON |
+| SudachiDict | [SudachiDict](https://github.com/WorksApplications/SudachiDict) の `small_lex.csv`|
+
+### SudachiDict
+**[Sudachi LICENSE-2.0](https://github.com/WorksApplications/SudachiDict/blob/develop/LICENSE-2.0.txt)**
+
+- SudachiDict by Works Applications Co., Ltd. is licensed under the Apache License, Version 2.0.
+Copyright (c) 2017-2023 Works Applications Co., Ltd.
+- **License**: Apache License 2.0
+- **Copyright**: © 2017-2023 Works Applications Co., Ltd.
+
+### JMdict / JMnedict
+**[EDRDG License](https://www.edrdg.org/edrdg/licence.html)**
+
+- **License**: Creative Commons Attribution-ShareAlike 4.0 (CC BY-SA 4.0)
+- **Provider**: Electronic Dictionary Research and Development Group (EDRDG)

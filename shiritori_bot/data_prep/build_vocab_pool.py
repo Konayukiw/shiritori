@@ -33,7 +33,6 @@ COL_NORM = 12
 
 CONJUGATING_POS = frozenset({"動詞", "形容詞"})
 
-# shiritori-Github と同様、Bot の標準語彙は small_lex を優先する
 PREFERRED_LEX_ORDER = ("small_lex.csv", "core_lex.csv", "notcore_lex.csv")
 
 SCHEMA = """
@@ -57,15 +56,6 @@ CREATE INDEX IF NOT EXISTS idx_vocab_category ON vocab(category);
 
 
 def classify_pos(pos1: str, pos2: str, pos3: str, pos4: str = "") -> str | None:
-    """UniDic/Sudachi 品詞からカテゴリを決定.
-
-    general は shiritori-Github と同じ ``名詞,普通名詞,一般`` のみ。
-    固有名詞・動詞は CLI フラグ用に別カテゴリで残す。
-
-    Returns:
-        general | verb | person | place | organization | proper | other
-        None = 語彙プールに入れない (助詞など)
-    """
     if pos1 == "名詞":
         if pos2 == "固有名詞":
             if pos3 == "人名":
@@ -77,7 +67,6 @@ def classify_pos(pos1: str, pos2: str, pos3: str, pos4: str = "") -> str | None:
             if pos3 in ("一般", "*"):
                 return "proper"
             return "other"
-        # GitHub: small_lex の 名詞,普通名詞,一般 のみをしりとり辞書に採用
         if pos2 == "普通名詞" and pos3 == "一般":
             return "general"
         return None
@@ -89,11 +78,6 @@ def classify_pos(pos1: str, pos2: str, pos3: str, pos4: str = "") -> str | None:
 
 
 def _find_lex_csvs(raw_dir: Path, *, small_only: bool = True) -> list[Path]:
-    """語彙 CSV を優先順で列挙する.
-
-    small_only=True (既定): shiritori-Github 同様 small_lex のみ。
-    small_only=False: small → core → notcore の順で見つかったものを全部。
-    """
     sudachi = raw_dir / "sudachi"
     search_dirs = [sudachi, raw_dir]
     found: dict[str, Path] = {}
@@ -112,7 +96,6 @@ def _find_lex_csvs(raw_dir: Path, *, small_only: bool = True) -> list[Path]:
     if small_only:
         if "small_lex.csv" in found:
             return [found["small_lex.csv"]]
-        # small が無い場合は見つかった先頭を使う
         return list(found.values())[:1] if found else []
 
     ordered: list[Path] = []
@@ -126,21 +109,12 @@ def _find_lex_csvs(raw_dir: Path, *, small_only: bool = True) -> list[Path]:
 
 
 def _is_dictionary_form(pos1: str, cform: str) -> bool:
-    """活用する品詞は終止形のみ True. 名詞など非活用は常に True."""
     if pos1 not in CONJUGATING_POS:
         return True
     return cform.startswith("終止形")
 
 
 def _parse_row(row: list[str]) -> tuple[str, str, str] | None:
-    """CSV 1行 → (surface, reading_hira, category) or None.
-
-    shiritori-Github の ``checkWord`` に相当するフィルタ:
-    - 品詞が採用対象か
-    - 読みがあり、かなのみで長さ > 1
-    - 表層が日本語として許容されるか（英数字だらけを除外）
-    - 「ん」終わり・旧仮名・1モーラを除外
-    """
     if len(row) < 12:
         return None
 
@@ -166,8 +140,6 @@ def _parse_row(row: list[str]) -> tuple[str, str, str] | None:
     if pos1 in CONJUGATING_POS and norm and norm != "*":
         surface = norm
 
-    # GitHub の kuromoji 検証の近似: 表層がしりとり語として不自然なものは落とす
-    # （1000th / CYBER / .com など。GitHub 側は形態素解析不一致で落ちる）
     if not is_allowed_surface(surface, allow_alnum=False):
         return None
 
@@ -175,7 +147,6 @@ def _parse_row(row: list[str]) -> tuple[str, str, str] | None:
     if not reading:
         return None
 
-    # GitHub: reading.length === 1 を除外 / 読みはカタカナのみ
     if not is_kana_only_reading(reading, allow_alnum=False):
         return None
     if contains_obsolete_kana(reading):
@@ -202,7 +173,6 @@ def build_pool(csv_paths: list[Path], out_db: Path) -> int:
     conn.execute("PRAGMA synchronous=OFF")
     conn.executescript(SCHEMA)
 
-    # GitHub は surface+reading で重複排除。こちらは reading 単位（既出読み禁止と整合）
     seen: set[str] = set()
     batch: list[tuple[str, str, str, str]] = []
     total = 0
@@ -288,7 +258,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"対象 CSV: {[p.name for p in csvs]}")
     if not all_lex:
-        print("  (shiritori-Github 同様 small_lex のみ。全 lex は --all-lex)")
+        print("  (small_lex のみ。全 lex を使用する場合は --all-lex)")
     out = cache_dir / VOCAB_DB_NAME
     build_pool(csvs, out)
     return 0
