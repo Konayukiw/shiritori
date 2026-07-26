@@ -1,45 +1,28 @@
 # しりとり Bot
 
-オフラインで実行可能なしりとり Bot です。Bot の語彙力は **SudachiDict** を参照します。
+しりとりができます。
 
 ## 必要環境
 
-- Python 3.10+（CLI / Desktop / ローカル Web サーバ）
-- 初回のみネットワークが必要（辞書ダウンロード）
-- Web 版（GitHub Pages）はブラウザのみで動作（静的 HTML/JS）
+- Web - 前提なし 
+- デスクトップ (GUI) - 前提なし
+- コマンド環境 (CLI) - Python 3.10+
+- GUI, CLI では初回のみネットワークが必要（辞書ダウンロード）
+
 
 ## 使い方
 
-[最新版しりとりBot](https://github.com/Konayukiw/shiritori/releases/latest) から `ShiritoriBot.exe` をダウンロードして実行するだけ！
+[しりとりBot](https://github.com/Konayukiw/shiritori/releases/latest) から `ShiritoriBot.exe` をダウンロードして実行するだけ！
 
 初回起動時は語彙力を身につけるために数分ほどかかることがあります。
 
-## 使い方 (Web / GitHub Pages)
+### 使い方 (Web)
 
-Web 版は **Python サーバ不要** の静的サイトです。対局ロジックはブラウザ上の JavaScript で動き、語彙は **原本の SudachiDict / JMdict / JMnedict** を直接読み込みます（CLI/Desktop が使う SQLite 語彙プールは使いません）。
+[しりとりBot](https://konayukiw.github.io/shiritori) を開くだけ！
 
-### GitHub Pages
+初回起動時は語彙力を身につけるために数分ほどかかることがあります。また、語彙をキャッシュするためストレージ容量に500 MBほどの余裕を持つことをおすすめします。
 
-1. リポジトリの **Settings → Pages → Build and deployment** で Source を **GitHub Actions** にする
-2. `main` への push、または Actions の **Deploy GitHub Pages** を手動実行
-3. ワークフローが原本辞書（`small_lex.zip` / `jmdict-eng.json.zip` / `jmnedict-all.json.zip`）を取得してサイトに同梱し、デプロイする
-
-初回アクセス時は辞書の展開・インデックス構築に時間がかかります。2 回目以降はブラウザの IndexedDB キャッシュを使います。
-
-### ローカルで Web 版を試す
-
-```bash
-# 原本辞書を data/raw に取得（未取得の場合）
-python -m bot.data_prep.download
-
-# bot/web を配信し、原本を bot/web/dicts/ に公開
-python -m bot.web.main
-# → http://127.0.0.1:8000/
-```
-
-`bot/web/dicts/` に置くファイルの説明は [`bot/web/dicts/README.md`](bot/web/dicts/README.md) を参照してください。
-
-## 使い方 (CLI)
+### 使い方 (CLI)
 
 - 環境構築
 
@@ -57,9 +40,9 @@ python -m bot.data_prep.setup_all
 python -m bot.cli.main
 ```
 
-### オプション
+### オプション (CLI)
 
-| フラグ | 意味 |
+| フラグ | 詳細 |
 |--------|------|
 | `--person` | 人名を許可 |
 | `--place` | 地名を許可 |
@@ -80,14 +63,14 @@ python -m bot.cli.main
 python -m bot.cli.main --place --person --ignore-dakuten
 ```
 
-### 対局中に使えるコマンド
+### 対局中に使えるコマンド (CLI)
 
 - `quit` / `exit` … 終了
 - `help` … ヘルプ
 - `status` … 手数・直前語など
 - `restart` … リセット
 
-## ルールの要点
+## ルール
 
 ### 単語の検証
 
