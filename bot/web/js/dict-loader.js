@@ -24,7 +24,6 @@ import {
   cacheSet,
   cacheKeys,
   cacheDeleteByPrefix,
-  cachePutSeries,
 } from "./storage.js";
 import { JmdictIndex } from "./validator.js";
 import { VocabPool } from "./selector.js";
@@ -602,18 +601,19 @@ async function saveToCache(hashes, sourceNames, sourceTag, jm, vocab, log) {
     savedAt: Date.now(),
   });
 
-  /** 
-   * @type {Array<[string, Uint8Array]>} 
-   */
-  
-  const chunks = [];
-  let jmBytesTotal = 0;
+  log(
+    `  JMdict ${jmdictKeys.length} 分割 / 語彙 ${vocabKeys.length} 分割 を書き込み中…`
+  );
+
   for (const [mora, bucket] of jmBuckets) {
     const bytes = zlibSync(strToU8(JSON.stringify(bucket)), { level: 6 });
-    jmBytesTotal += bytes.byteLength;
-    chunks.push([`${CACHE_PREFIX}:jmdict:${mora}`, bytes]);
+    try {
+      await cacheSet(`${CACHE_PREFIX}:jmdict:${mora}`, bytes);
+    } catch (e) {
+      log(`  jmdict:${mora} の保存に失敗しました: ${e.message}`);
+    }
+    await new Promise((r) => setTimeout(r, 0));
   }
-  let vocabBytesTotal = 0;
   for (const [mora, bucket] of vocab.byFirstMora) {
     const entries = bucket.map((w) => [
       w.reading,
@@ -621,19 +621,13 @@ async function saveToCache(hashes, sourceNames, sourceTag, jm, vocab, log) {
       CATEGORY_TO_CODE[w.category] ?? 6,
     ]);
     const bytes = zlibSync(strToU8(JSON.stringify(entries)), { level: 6 });
-    vocabBytesTotal += bytes.byteLength;
-    chunks.push([`${CACHE_PREFIX}:vocab:${mora}`, bytes]);
+    try {
+      await cacheSet(`${CACHE_PREFIX}:vocab:${mora}`, bytes);
+    } catch (e) {
+      log(`  vocab:${mora} の保存に失敗しました: ${e.message}`);
+    }
+    await new Promise((r) => setTimeout(r, 0));
   }
-
-  log(
-    `  JMdict: ${(jmBytesTotal / 1024 / 1024).toFixed(1)} MB (${jmdictKeys.length} 分割) / ` +
-    `語彙: ${(vocabBytesTotal / 1024 / 1024).toFixed(1)} MB (${vocabKeys.length} 分割)`
-  );
-  log(`  合計 ${chunks.length} チャンクを書き込み中…`);
-
-  await cachePutSeries(chunks, (key, e) => {
-    log(`  『${key.replace(CACHE_PREFIX + ":", "")}』の保存に失敗: ${e.message}`);
-  });
 }
 
 /**
