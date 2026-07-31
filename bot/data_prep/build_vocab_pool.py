@@ -249,7 +249,7 @@ def main(argv: list[str] | None = None) -> int:
     csvs = _find_lex_csvs(raw_dir, small_only=not all_lex)
     if not csvs:
         print(
-            "SudachiDict CSV が見つかりません。\n"
+            "SudachiDict からファイルが見つかりません。\n"
             "  python -m shiritori_bot.data_prep.download\n"
             "  または: python -m shiritori_bot.data_prep.build_vocab_pool --download",
             file=sys.stderr,
