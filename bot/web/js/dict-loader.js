@@ -23,6 +23,7 @@ import {
   cacheSet,
   cacheKeys,
   cacheDeleteByPrefix,
+  cachePutSeries,
 } from "./storage.js";
 import { JmdictIndex } from "./validator.js";
 import { VocabPool } from "./selector.js";
@@ -589,7 +590,6 @@ async function saveToCache(hashes, sourceNames, sourceTag, jm, vocab, log) {
     ]);
   }
   const jmdictKeys = Array.from(jmBuckets.keys());
-
   const vocabKeys = Array.from(vocab.byFirstMora.keys());
 
   await cacheSet(`${CACHE_PREFIX}:meta`, {
@@ -601,20 +601,17 @@ async function saveToCache(hashes, sourceNames, sourceTag, jm, vocab, log) {
     savedAt: Date.now(),
   });
 
+  /** 
+   * @type {Array<[string, Uint8Array]>} 
+   */
+  
+  const chunks = [];
   let jmBytesTotal = 0;
   for (const [mora, bucket] of jmBuckets) {
     const bytes = zipSync(strToU8(JSON.stringify(bucket)));
     jmBytesTotal += bytes.byteLength;
-    try {
-      await cacheSet(`${CACHE_PREFIX}:jmdict:${mora}`, bytes);
-    } catch (e) {
-      log(`  JMdictキャッシュ『${mora}』の保存に失敗しました: ${e.message}`);
-    }
+    chunks.push([`${CACHE_PREFIX}:jmdict:${mora}`, bytes]);
   }
-  log(
-    `  JMdictキャッシュ: ${(jmBytesTotal / 1024 / 1024).toFixed(1)} MB (${jmdictKeys.length} 分割)`
-  );
-
   let vocabBytesTotal = 0;
   for (const [mora, bucket] of vocab.byFirstMora) {
     const entries = bucket.map((w) => [
@@ -624,15 +621,18 @@ async function saveToCache(hashes, sourceNames, sourceTag, jm, vocab, log) {
     ]);
     const bytes = zipSync(strToU8(JSON.stringify(entries)));
     vocabBytesTotal += bytes.byteLength;
-    try {
-      await cacheSet(`${CACHE_PREFIX}:vocab:${mora}`, bytes);
-    } catch (e) {
-      log(`  語彙キャッシュ『${mora}』の保存に失敗しました: ${e.message}`);
-    }
+    chunks.push([`${CACHE_PREFIX}:vocab:${mora}`, bytes]);
   }
+
   log(
-    `  語彙キャッシュ: ${(vocabBytesTotal / 1024 / 1024).toFixed(1)} MB (${vocabKeys.length} 分割)`
+    `  JMdict: ${(jmBytesTotal / 1024 / 1024).toFixed(1)} MB (${jmdictKeys.length} 分割) / ` +
+    `語彙: ${(vocabBytesTotal / 1024 / 1024).toFixed(1)} MB (${vocabKeys.length} 分割)`
   );
+  log(`  合計 ${chunks.length} チャンクを書き込み中…`);
+
+  await cachePutSeries(chunks, (key, e) => {
+    log(`  『${key.replace(CACHE_PREFIX + ":", "")}』の保存に失敗: ${e.message}`);
+  });
 }
 
 /**
