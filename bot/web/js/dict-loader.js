@@ -1,8 +1,9 @@
 import {
   unzipSync,
   strFromU8,
-  zipSync,
   strToU8,
+  zlibSync,
+  unzlibSync,
 } from "https://cdn.jsdelivr.net/npm/fflate@0.8.2/esm/browser.js";
 
 import { DICT_SOURCES } from "./config.js";
@@ -524,7 +525,7 @@ async function loadFromCache(jmdictKeys, vocabKeys, log) {
     const raw = await cacheGet(`${CACHE_PREFIX}:jmdict:${mora}`);
     if (!raw) continue;
     const { s: sEntries, r: rEntries } = JSON.parse(
-      strFromU8(unzipSync(raw))
+      strFromU8(unzlibSync(raw))
     );
     for (const [key, reading, srcCode] of sEntries) {
       bySurface.set(key, {
@@ -550,7 +551,7 @@ async function loadFromCache(jmdictKeys, vocabKeys, log) {
   for (const mora of vocabKeys) {
     const raw = await cacheGet(`${CACHE_PREFIX}:vocab:${mora}`);
     if (!raw) continue;
-    const entries = JSON.parse(strFromU8(unzipSync(raw)));
+    const entries = JSON.parse(strFromU8(unzlibSync(raw)));
     const bucket = entries.map(([reading, surface, catCode]) => ({
       surface,
       reading,
@@ -608,7 +609,7 @@ async function saveToCache(hashes, sourceNames, sourceTag, jm, vocab, log) {
   const chunks = [];
   let jmBytesTotal = 0;
   for (const [mora, bucket] of jmBuckets) {
-    const bytes = zipSync(strToU8(JSON.stringify(bucket)));
+    const bytes = zlibSync(strToU8(JSON.stringify(bucket)), { level: 6 });
     jmBytesTotal += bytes.byteLength;
     chunks.push([`${CACHE_PREFIX}:jmdict:${mora}`, bytes]);
   }
@@ -619,7 +620,7 @@ async function saveToCache(hashes, sourceNames, sourceTag, jm, vocab, log) {
       w.surface,
       CATEGORY_TO_CODE[w.category] ?? 6,
     ]);
-    const bytes = zipSync(strToU8(JSON.stringify(entries)));
+    const bytes = zlibSync(strToU8(JSON.stringify(entries)), { level: 6 });
     vocabBytesTotal += bytes.byteLength;
     chunks.push([`${CACHE_PREFIX}:vocab:${mora}`, bytes]);
   }
