@@ -25,14 +25,27 @@ function dakutenVariants(base) {
 }
 
 export class VocabPool {
+
   /**
    * @param {Map<string, Array<{surface:string, reading:string, category:string}>>} byFirstMora
+   * @param {{ loadMora?: (mora: string) => Promise<Array<{surface:string, reading:string, category:string}>> }} [opts]
    */
-  constructor(byFirstMora) {
+  
+  constructor(byFirstMora, opts = {}) {
     this.byFirstMora = byFirstMora;
+    this._loadMora = opts.loadMora || null;
+    this._requested = new Set();
   }
 
-  findCandidates(
+  async _ensureMora(key) {
+    if (this.byFirstMora.has(key) || !this._loadMora || this._requested.has(key))
+      return;
+    this._requested.add(key);
+    const bucket = await this._loadMora(key);
+    if (bucket && bucket.length) this.byFirstMora.set(key, bucket);
+  }
+
+  async findCandidates(
     firstMora,
     { allowedCategories, usedReadings, requireDakutenMatch = true }
   ) {
@@ -44,6 +57,8 @@ export class VocabPool {
       keys.add(stripped);
       for (const v of dakutenVariants(stripped)) keys.add(v);
     }
+
+    for (const key of keys) await this._ensureMora(key);
 
     const allowed = new Set(allowedCategories);
     /** @type {BotWord[]} */
@@ -94,8 +109,8 @@ export class BotWordSelector {
     return cats;
   }
 
-  select(requiredFirstMora, usedReadings) {
-    const candidates = this.pool.findCandidates(requiredFirstMora, {
+  async select(requiredFirstMora, usedReadings) {
+    const candidates = await this.pool.findCandidates(requiredFirstMora, {
       allowedCategories: this.allowedCategories(),
       usedReadings,
       requireDakutenMatch: this.config.requireDakutenMatch,

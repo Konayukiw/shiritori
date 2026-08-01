@@ -24,7 +24,10 @@ const els = {
   cbAllowAlnum: document.getElementById("cb-allow-alnum"),
 };
 
-/** @type {{ config: object, jmdict: import("./validator.js").JmdictIndex, pool: import("./selector.js").VocabPool, validator: OpponentWordValidator, selector: BotWordSelector, game: GameState } | null} */
+/** 
+ * @type {{ config: object, jmdict: import("./validator.js").JmdictIndex, pool: import("./selector.js").VocabPool, validator: OpponentWordValidator, selector: BotWordSelector, game: GameState } | null} 
+ */
+
 let app = null;
 let setupDone = false;
 let busy = false;
@@ -87,9 +90,9 @@ function applyConfig(cfg) {
   app.selector = new BotWordSelector(app.pool, cfg);
 }
 
-function maybeBotFirst() {
+async function maybeBotFirst() {
   if (!app || !els.cbBotFirst.checked) return;
-  const start = app.selector.select("し", new Set());
+  const start = await app.selector.select("し", new Set());
   if (start == null) {
     app.game.markUsed("しりとり", "しりとり", "bot");
     log("Bot", "しりとり（しりとり）");
@@ -112,7 +115,7 @@ function restartGame() {
   els.wordInput.focus();
 }
 
-function submitWord(word) {
+async function submitWord(word) {
   if (!app || !setupDone || busy) return;
   const userInput = word.trim();
   if (!userInput) return;
@@ -149,7 +152,7 @@ function submitWord(word) {
       return;
     }
 
-    const botWord = app.selector.select(
+    const botWord = await app.selector.select(
       result.effectiveLastMora || "",
       app.game.usedReadings
     );

@@ -36,8 +36,7 @@ export async function cacheGet(key) {
       req.onsuccess = () => resolve(req.result ?? null);
       req.onerror = () => reject(req.error);
     });
-  } catch {
-    log(`  cacheGetに失敗しました: ${e.name}: ${e.message}`);
+  } catch (e) {
     return null;
   }
 }
@@ -123,4 +122,24 @@ export async function cacheDeleteByPrefix(prefix) {
     }
   } catch {
   }
+}
+
+export async function storagePersist() {
+  try {
+    if (navigator.storage && navigator.storage.persist) {
+      return await navigator.storage.persist();
+    }
+  } catch {
+  }
+  return false;
+}
+
+export async function storageEstimate() {
+  try {
+    if (navigator.storage && navigator.storage.estimate) {
+      return await navigator.storage.estimate();
+    }
+  } catch {
+  }
+  return { usage: 0, quota: Infinity };
 }

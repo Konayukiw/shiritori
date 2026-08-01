@@ -24,6 +24,8 @@ import {
   cacheSet,
   cacheKeys,
   cacheDeleteByPrefix,
+  storagePersist,
+  storageEstimate,
 } from "./storage.js";
 import { JmdictIndex } from "./validator.js";
 import { VocabPool } from "./selector.js";
@@ -55,6 +57,13 @@ const CODE_TO_CATEGORY = [
 ];
 
 const CACHE_PREFIX = "shiritori-web-v2";
+const NUM_SHARDS = 16;
+
+function shardFor(mora) {
+  let h = 0;
+  for (const ch of mora) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+  return h % NUM_SHARDS;
+}
 
 async function fetchOk(url, { as = "arrayBuffer" } = {}) {
   const res = await fetch(url, {
@@ -72,6 +81,32 @@ async function tryFetch(urls, options) {
     try {
       const data = await fetchOk(url, options);
       return { url, data };
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error("URLの取得に失敗しました");
+}
+
+async function fetchWithMeta(url) {
+  const res = await fetch(url, {
+    headers: { "User-Agent": "shiritori-bot-web/0.1" },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  const data = await res.arrayBuffer();
+  return {
+    data,
+    url,
+    etag: res.headers.get("etag"),
+    lastModified: res.headers.get("last-modified"),
+  };
+}
+
+async function tryFetchWithMeta(urls) {
+  let lastErr = null;
+  for (const url of urls) {
+    try {
+      return await fetchWithMeta(url);
     } catch (e) {
       lastErr = e;
     }
@@ -355,24 +390,33 @@ async function resolveJmdictAssetUrls(log) {
 
 async function loadJmdictBuffers(log, { includeJmnedict = true } = {}) {
   const local = DICT_SOURCES.local;
-  const out = { jmdict: null, jmnedict: null, sourceTag: "local" };
+  const out = {
+    jmdict: null,
+    jmnedict: null,
+    sourceTag: "local",
+    sourceMeta: {},
+  };
 
   log("JMdictからファイルを取得中…");
   try {
-    const hit = await tryFetch([local.jmdictZip], { as: "arrayBuffer" });
+    const hit = await tryFetchWithMeta([local.jmdictZip]);
     log(`  取得元: ${hit.url}`);
     out.jmdict = hit.data;
+    out.sourceMeta.jmdict = { url: hit.url, etag: hit.etag, lastModified: hit.lastModified };
   } catch {
     try {
-      const hit = await tryFetch([local.jmdictJson], { as: "arrayBuffer" });
+      const hit = await tryFetchWithMeta([local.jmdictJson]);
       log(`  取得元: ${hit.url}`);
       out.jmdict = hit.data;
+      out.sourceMeta.jmdict = { url: hit.url, etag: hit.etag, lastModified: hit.lastModified };
     } catch {
       const urls = await resolveJmdictAssetUrls(log);
       out.sourceTag = urls.tag;
       log("JMdictからファイルを取得中…");
       try {
-        out.jmdict = await fetchOk(urls.jmdict, { as: "arrayBuffer" });
+        const hit = await fetchWithMeta(urls.jmdict);
+        out.jmdict = hit.data;
+        out.sourceMeta.jmdict = { url: hit.url, etag: hit.etag, lastModified: hit.lastModified };
       } catch (e) {
         throw new Error(
           `JMdictからのファイルの取得に失敗しました: ${e.message}\n`
@@ -384,16 +428,16 @@ async function loadJmdictBuffers(log, { includeJmnedict = true } = {}) {
   if (includeJmnedict) {
     log("JMnedictからファイルを取得中…");
     try {
-      const hit = await tryFetch([local.jmnedictZip], { as: "arrayBuffer" });
+      const hit = await tryFetchWithMeta([local.jmnedictZip]);
       log(`  取得元: ${hit.url}`);
       out.jmnedict = hit.data;
+      out.sourceMeta.jmnedict = { url: hit.url, etag: hit.etag, lastModified: hit.lastModified };
     } catch {
       try {
-        const hit = await tryFetch([local.jmnedictJson], {
-          as: "arrayBuffer",
-        });
+        const hit = await tryFetchWithMeta([local.jmnedictJson]);
         log(`  取得元: ${hit.url}`);
         out.jmnedict = hit.data;
+        out.sourceMeta.jmnedict = { url: hit.url, etag: hit.etag, lastModified: hit.lastModified };
       } catch (e) {
         log(`  JMnedictからのファイルの取得をスキップ: ${e.message}`);
       }
@@ -408,12 +452,13 @@ async function loadSudachiBuffer(log) {
   const remoteZip = `${DICT_SOURCES.sudachiBase}/${DICT_SOURCES.sudachiRelease}/${DICT_SOURCES.sudachiFile}`;
 
   log("SudachiDictからファイルを取得中…");
-  const { url, data } = await tryFetch(
-    [local.sudachiZip, remoteZip, local.sudachiCsv],
-    { as: "arrayBuffer" }
-  );
-  log(`  取得元: ${url}`);
-  return { url, data };
+  const hit = await tryFetchWithMeta([local.sudachiZip, remoteZip, local.sudachiCsv]);
+  log(`  取得元: ${hit.url}`);
+  return {
+    url: hit.url,
+    data: hit.data,
+    sourceMeta: { url: hit.url, etag: hit.etag, lastModified: hit.lastModified },
+  };
 }
 
 function parseJmdictSources(sources, log) {
@@ -476,6 +521,40 @@ async function computeSha256Hex(buffer) {
   ).join("");
 }
 
+async function checkFreshnessViaHead(log) {
+  const meta = await cacheGet(`${CACHE_PREFIX}:meta`);
+  if (!meta || !meta.sourceMeta) return null;
+
+  for (const [name, info] of Object.entries(meta.sourceMeta)) {
+    if (!info.url) return null;
+    try {
+      const res = await fetch(info.url, { method: "HEAD" });
+      if (!res.ok) return null;
+      const etag = res.headers.get("etag");
+      const lastModified = res.headers.get("last-modified");
+      if (!etag && !lastModified) return null;
+      if (etag && info.etag && etag !== info.etag) {
+        log(`  ${name}: eTagの変更を検知したため再取得します`);
+        return null;
+      }
+      if (!etag && lastModified && info.lastModified && lastModified !== info.lastModified) {
+        log(`  ${name}: LastModifiedの変更を検知したため再取得します`);
+        return null;
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  const allKeys = new Set(await cacheKeys());
+  for (let i = 0; i < NUM_SHARDS; i++) {
+    if (!allKeys.has(`${CACHE_PREFIX}:jmdict:s${i}`)) return null;
+    if (!allKeys.has(`${CACHE_PREFIX}:vocab:s${i}`)) return null;
+  }
+
+  return meta;
+}
+
 async function findValidCache(hashes, sourceNames, log) {
   const meta = await cacheGet(`${CACHE_PREFIX}:meta`);
   if (!meta || !meta.hashes) return null;
@@ -497,83 +576,109 @@ async function findValidCache(hashes, sourceNames, log) {
   }
 
   const allKeys = new Set(await cacheKeys());
-  const jmdictKeys = meta.jmdictKeys || [];
-  for (const mora of jmdictKeys) {
-    if (!allKeys.has(`${CACHE_PREFIX}:jmdict:${mora}`)) {
-      log("JMdictキャッシュの一部が欠損しています。キャッシュを再構築します");
+  for (let i = 0; i < NUM_SHARDS; i++) {
+    if (!allKeys.has(`${CACHE_PREFIX}:jmdict:s${i}`)) {
+      log(`JMdictシャード s${i} が欠損しています。キャッシュを再構築します`);
       return null;
     }
-  }
-  const vocabKeys = meta.vocabKeys || [];
-  for (const mora of vocabKeys) {
-    if (!allKeys.has(`${CACHE_PREFIX}:vocab:${mora}`)) {
-      log("語彙キャッシュの一部が欠損しています。キャッシュを再構築します");
+    if (!allKeys.has(`${CACHE_PREFIX}:vocab:s${i}`)) {
+      log(`語彙シャード s${i} が欠損しています。キャッシュを再構築します`);
       return null;
     }
   }
 
-  return { meta, jmdictKeys, vocabKeys };
+  return { meta };
 }
 
-async function loadFromCache(jmdictKeys, vocabKeys, log) {
-  log("キャッシュから語彙を復元中…");
+async function loadFromCache(log) {
+  log("キャッシュからJMdictを復元中…");
 
   const bySurface = new Map();
   const byReading = new Map();
-  for (const mora of jmdictKeys) {
-    const raw = await cacheGet(`${CACHE_PREFIX}:jmdict:${mora}`);
+  for (let i = 0; i < NUM_SHARDS; i++) {
+    const raw = await cacheGet(`${CACHE_PREFIX}:jmdict:s${i}`);
     if (!raw) continue;
-    const { s: sEntries, r: rEntries } = JSON.parse(
-      strFromU8(unzlibSync(raw))
-    );
-    for (const [key, reading, srcCode] of sEntries) {
-      bySurface.set(key, {
-        surface: key,
-        reading,
-        source: CODE_TO_SOURCE[srcCode],
-      });
+    const groups = JSON.parse(strFromU8(unzlibSync(raw)));
+    for (const mora of Object.keys(groups)) {
+      const { s: sEntries, r: rEntries } = groups[mora];
+      for (const [key, reading, srcCode] of sEntries) {
+        bySurface.set(key, {
+          surface: key,
+          reading,
+          source: CODE_TO_SOURCE[srcCode],
+        });
+      }
+      for (const [key, surface, reading, srcCode] of rEntries) {
+        byReading.set(key, {
+          surface,
+          reading,
+          source: CODE_TO_SOURCE[srcCode],
+        });
+      }
     }
-    for (const [key, surface, reading, srcCode] of rEntries) {
-      byReading.set(key, {
-        surface,
-        reading,
-        source: CODE_TO_SOURCE[srcCode],
-      });
-    }
+    await new Promise((r) => setTimeout(r, 0));
   }
   log(
     `  JMdict: ${(bySurface.size + byReading.size).toLocaleString()} 件復元`
   );
 
-  const byFirstMora = new Map();
-  let vocabCount = 0;
-  for (const mora of vocabKeys) {
-    const raw = await cacheGet(`${CACHE_PREFIX}:vocab:${mora}`);
-    if (!raw) continue;
-    const entries = JSON.parse(strFromU8(unzlibSync(raw)));
-    const bucket = entries.map(([reading, surface, catCode]) => ({
-      surface,
-      reading,
-      category: CODE_TO_CATEGORY[catCode],
-    }));
-    byFirstMora.set(mora, bucket);
-    vocabCount += bucket.length;
+  const shardCache = new Map();
+  async function loadMora(mora) {
+    const si = shardFor(mora);
+    if (!shardCache.has(si)) {
+      const raw = await cacheGet(`${CACHE_PREFIX}:vocab:s${si}`);
+      if (!raw) {
+        shardCache.set(si, {});
+      } else {
+        const groups = JSON.parse(strFromU8(unzlibSync(raw)));
+        const parsed = {};
+        for (const m of Object.keys(groups)) {
+          parsed[m] = groups[m].map(([reading, surface, catCode]) => ({
+            surface,
+            reading,
+            category: CODE_TO_CATEGORY[catCode],
+          }));
+        }
+        shardCache.set(si, parsed);
+      }
+    }
+    return shardCache.get(si)[mora] || [];
   }
-  log(`  語彙プール: ${vocabCount.toLocaleString()} 語復元`);
 
-  return { bySurface, byReading, byFirstMora };
+  const pool = new VocabPool(new Map(), { loadMora });
+  log("  語彙プール: 遅延読み込みモード");
+
+  return { bySurface, byReading, pool };
 }
 
-async function saveToCache(hashes, sourceNames, sourceTag, jm, vocab, log) {
+async function saveToCache(hashes, sourceNames, sourceTag, sourceMeta, jm, vocab, log) {
+  const estimate = await storageEstimate();
+  const available = estimate.quota - estimate.usage;
+  if (available < 30 * 1024 * 1024) {
+    log(`  空き容量不足 (${(available / 1024 / 1024).toFixed(0)} MB) → キャッシュをスキップします`);
+    return;
+  }
+
   log("ブラウザキャッシュに保存中…");
   await cacheDeleteByPrefix(CACHE_PREFIX);
   await cacheDeleteByPrefix("shiritori-web-dict-v1");
 
-  const jmBuckets = new Map();
+  await cacheSet(`${CACHE_PREFIX}:meta`, {
+    hashes,
+    sources: sourceNames,
+    sourceTag,
+    sourceMeta,
+    savedAt: Date.now(),
+  });
+
+  log(`  ${NUM_SHARDS} シャード x2 を書き込み中…`);
+
+  const jmShards = Array.from({ length: NUM_SHARDS }, () => ({}));
   for (const [key, hit] of jm.bySurface) {
     const mora = effectiveFirstMora(hit.reading) || hit.reading[0] || "_";
-    if (!jmBuckets.has(mora)) jmBuckets.set(mora, { s: [], r: [] });
-    jmBuckets.get(mora).s.push([
+    const si = shardFor(mora);
+    if (!jmShards[si][mora]) jmShards[si][mora] = { s: [], r: [] };
+    jmShards[si][mora].s.push([
       key,
       hit.reading,
       SOURCE_TO_CODE[hit.source] ?? 0,
@@ -581,50 +686,42 @@ async function saveToCache(hashes, sourceNames, sourceTag, jm, vocab, log) {
   }
   for (const [key, hit] of jm.byReading) {
     const mora = effectiveFirstMora(key) || key[0] || "_";
-    if (!jmBuckets.has(mora)) jmBuckets.set(mora, { s: [], r: [] });
-    jmBuckets.get(mora).r.push([
+    const si = shardFor(mora);
+    if (!jmShards[si][mora]) jmShards[si][mora] = { s: [], r: [] };
+    jmShards[si][mora].r.push([
       key,
       hit.surface,
       hit.reading,
       SOURCE_TO_CODE[hit.source] ?? 0,
     ]);
   }
-  const jmdictKeys = Array.from(jmBuckets.keys());
-  const vocabKeys = Array.from(vocab.byFirstMora.keys());
-
-  await cacheSet(`${CACHE_PREFIX}:meta`, {
-    hashes,
-    sources: sourceNames,
-    sourceTag,
-    jmdictKeys,
-    vocabKeys,
-    savedAt: Date.now(),
-  });
-
-  log(
-    `  JMdict ${jmdictKeys.length} 分割 / 語彙 ${vocabKeys.length} 分割 を書き込み中…`
-  );
-
-  for (const [mora, bucket] of jmBuckets) {
-    const bytes = zlibSync(strToU8(JSON.stringify(bucket)), { level: 6 });
+  for (let i = 0; i < NUM_SHARDS; i++) {
+    const bytes = zlibSync(strToU8(JSON.stringify(jmShards[i])), { level: 6 });
     try {
-      await cacheSet(`${CACHE_PREFIX}:jmdict:${mora}`, bytes);
+      await cacheSet(`${CACHE_PREFIX}:jmdict:s${i}`, bytes);
     } catch (e) {
-      log(`  jmdict:${mora} の保存に失敗しました: ${e.message}`);
+      log(`  jmdict:s${i} の保存に失敗しました: ${e.message}`);
     }
     await new Promise((r) => setTimeout(r, 0));
   }
+
+  const vocabShards = Array.from({ length: NUM_SHARDS }, () => ({}));
   for (const [mora, bucket] of vocab.byFirstMora) {
-    const entries = bucket.map((w) => [
+    const si = shardFor(mora);
+    vocabShards[si][mora] = bucket.map((w) => [
       w.reading,
       w.surface,
       CATEGORY_TO_CODE[w.category] ?? 6,
     ]);
-    const bytes = zlibSync(strToU8(JSON.stringify(entries)), { level: 6 });
+  }
+  for (let i = 0; i < NUM_SHARDS; i++) {
+    const bytes = zlibSync(strToU8(JSON.stringify(vocabShards[i])), {
+      level: 6,
+    });
     try {
-      await cacheSet(`${CACHE_PREFIX}:vocab:${mora}`, bytes);
+      await cacheSet(`${CACHE_PREFIX}:vocab:s${i}`, bytes);
     } catch (e) {
-      log(`  vocab:${mora} の保存に失敗しました: ${e.message}`);
+      log(`  vocab:s${i} の保存に失敗しました: ${e.message}`);
     }
     await new Promise((r) => setTimeout(r, 0));
   }
@@ -637,6 +734,26 @@ async function saveToCache(hashes, sourceNames, sourceTag, jm, vocab, log) {
 
 export async function loadDictionaries(log = () => {}, options = {}) {
   const { forceReload = false, includeJmnedict = true } = options;
+
+  await storagePersist();
+
+  if (!forceReload) {
+    try {
+      log("キャッシュの鮮度をHEADで確認中…");
+      const freshMeta = await checkFreshnessViaHead(log);
+      if (freshMeta) {
+        const cached = await loadFromCache(log);
+        return {
+          jmdict: new JmdictIndex(cached.bySurface, cached.byReading),
+          pool: cached.pool,
+          fromCache: true,
+          sourceTag: freshMeta.sourceTag || "cache",
+        };
+      }
+    } catch (e) {
+      log(`  HEAD確認に失敗: ${e.message} → ダウンロードします`);
+    }
+  }
 
   log("ソースファイルを取得中…");
   const jmBuffers = await loadJmdictBuffers(log, { includeJmnedict });
@@ -656,17 +773,17 @@ export async function loadDictionaries(log = () => {}, options = {}) {
 
   if (!forceReload) {
     try {
-      log("キャッシュを確認中…");
-    const valid = await findValidCache(hashes, sourceNames, log);
-    if (valid) {
-      const cached = await loadFromCache(valid.jmdictKeys, valid.vocabKeys, log);
-      return {
-        jmdict: new JmdictIndex(cached.bySurface, cached.byReading),
-        pool: new VocabPool(cached.byFirstMora),
-        fromCache: true,
-        sourceTag: valid.meta.sourceTag || "cache",
-      };
-    }
+      log("キャッシュをハッシュで確認中…");
+      const valid = await findValidCache(hashes, sourceNames, log);
+      if (valid) {
+        const cached = await loadFromCache(log);
+        return {
+          jmdict: new JmdictIndex(cached.bySurface, cached.byReading),
+          pool: cached.pool,
+          fromCache: true,
+          sourceTag: valid.meta.sourceTag || "cache",
+        };
+      }
     } catch (e) {
       log(`  キャッシュの確認に失敗しました: ${e.name}: ${e.message}`);
     }
@@ -676,11 +793,14 @@ export async function loadDictionaries(log = () => {}, options = {}) {
   const jm = parseJmdictSources(jmBuffers, log);
   const vocab = parseSudachiSource(sudachiBuffer, log);
 
+  const sourceMeta = { ...jmBuffers.sourceMeta, sudachi: sudachiBuffer.sourceMeta };
+
   try {
     await saveToCache(
       hashes,
       sourceNames,
       jmBuffers.sourceTag,
+      sourceMeta,
       jm,
       vocab,
       log
