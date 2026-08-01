@@ -2,8 +2,11 @@ const DB_NAME = "shiritori-bot-web";
 const DB_VERSION = 1;
 const STORE = "dict-cache";
 
+let dbPromise = null;
+
 function openDb() {
-  return new Promise((resolve, reject) => {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
@@ -11,9 +14,17 @@ function openDb() {
         db.createObjectStore(STORE);
       }
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      db.onclose = () => { dbPromise = null; };
+      resolve(db);
+    };
+    req.onerror = () => {
+      dbPromise = null;
+      reject(req.error);
+    };
   });
+  return dbPromise;
 }
 
 export async function cacheGet(key) {
@@ -26,7 +37,7 @@ export async function cacheGet(key) {
       req.onerror = () => reject(req.error);
     });
   } catch {
-    alert(`cacheGetに失敗しました: ${e.name}: ${e.message}`);
+    log(`  cacheGetに失敗しました: ${e.name}: ${e.message}`);
     return null;
   }
 }

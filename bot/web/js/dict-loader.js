@@ -668,7 +668,7 @@ export async function loadDictionaries(log = () => {}, options = {}) {
       };
     }
     } catch (e) {
-      alert(`キャッシュの確認に失敗しました: ${e.name}: ${e.message}`);
+      log(`  キャッシュの確認に失敗しました: ${e.name}: ${e.message}`);
     }
   }
 
