@@ -26,6 +26,7 @@ export async function cacheGet(key) {
       req.onerror = () => reject(req.error);
     });
   } catch {
+    alert(`cacheGetに失敗しました: ${e.name}: ${e.message}`);
     return null;
   }
 }

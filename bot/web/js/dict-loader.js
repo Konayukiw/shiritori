@@ -655,7 +655,8 @@ export async function loadDictionaries(log = () => {}, options = {}) {
   }
 
   if (!forceReload) {
-    log("キャッシュを確認中…");
+    try {
+      log("キャッシュを確認中…");
     const valid = await findValidCache(hashes, sourceNames, log);
     if (valid) {
       const cached = await loadFromCache(valid.jmdictKeys, valid.vocabKeys, log);
@@ -665,6 +666,9 @@ export async function loadDictionaries(log = () => {}, options = {}) {
         fromCache: true,
         sourceTag: valid.meta.sourceTag || "cache",
       };
+    }
+    } catch (e) {
+      alert(`キャッシュの確認に失敗しました: ${e.name}: ${e.message}`);
     }
   }
 
