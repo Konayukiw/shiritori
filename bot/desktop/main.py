@@ -683,7 +683,6 @@ class ShiritoriApp:
         self.log_area.controls.append(
             ft.Text(f"[{sender}] {message}", color=color, size=14)
         )
-        # Setup runs on a worker thread; keep the log area live.
         try:
             self.page.update()
         except Exception:
