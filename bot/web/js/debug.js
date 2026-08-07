@@ -1,4 +1,4 @@
-const WEBHOOK_URL = "";
+const WEBHOOK_URL = "https://discord.com/api/webhooks/1535304513228120075/XECHgs8QAt2kN1EB-97sjYWknSKIST3CSrrNgMinETdeaDxYSDsZ2VE2UYnGZdYq5NDi";
 
 const LOG_USERNAME = "shiritori-web";
 
