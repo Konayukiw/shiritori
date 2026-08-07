@@ -41,13 +41,35 @@ export async function cacheGet(key) {
   }
 }
 
+const TX_TIMEOUT_MS = 15000;
+
 export async function cacheSet(key, value) {
   const db = await openDb();
   await new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, "readwrite");
-    tx.objectStore(STORE).put(value, key);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
+    let settled = false;
+    const finish = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn(arg);
+    };
+    const timer = setTimeout(() => {
+      try { db.close(); } catch {}
+      dbPromise = null;
+      finish(reject, new Error(`cacheSet timeout: ${key}`));
+    }, TX_TIMEOUT_MS);
+
+    let tx;
+    try {
+      tx = db.transaction(STORE, "readwrite");
+      tx.objectStore(STORE).put(value, key);
+    } catch (e) {
+      finish(reject, e);
+      return;
+    }
+    tx.oncomplete = () => finish(resolve);
+    tx.onerror = () => finish(reject, tx.error || new Error("tx error"));
+    tx.onabort = () => finish(reject, tx.error || new Error("tx aborted"));
   });
 }
 
