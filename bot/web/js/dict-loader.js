@@ -27,6 +27,7 @@ import {
   storagePersist,
   storageEstimate,
 } from "./storage.js";
+import { sendWebhook } from "./debug.js";
 import { JmdictIndex } from "./validator.js";
 import { VocabPool } from "./selector.js";
 
@@ -656,6 +657,10 @@ async function saveToCache(hashes, sourceNames, sourceTag, sourceMeta, jm, vocab
   const available = estimate.quota - estimate.usage;
   if (available < 30 * 1024 * 1024) {
     log(`  空き容量不足 (${(available / 1024 / 1024).toFixed(0)} MB) → キャッシュをスキップします`);
+    log(
+      `dict-loader.js /655: saveToCacheが空き容量不足により失敗しました。 Available=${(available / 1024 / 1024).toFixed(0)}MB Quota=${(estimate.quota / 1024 / 1024).toFixed(0)}MB Usage=${(estimate.usage / 1024 / 1024).toFixed(0)}MB`,
+      "warn"
+    );
     return;
   }
 
@@ -701,6 +706,7 @@ async function saveToCache(hashes, sourceNames, sourceTag, sourceMeta, jm, vocab
       await cacheSet(`${CACHE_PREFIX}:jmdict:s${i}`, bytes);
     } catch (e) {
       log(`  jmdict:s${i} の保存に失敗しました: ${e.message}`);
+      log(`dict-loader.js /709: saveToCache (s${i}) 失敗: ${e.name}: ${e.message}`, "error");
     }
     await new Promise((r) => setTimeout(r, 0));
   }
@@ -722,6 +728,7 @@ async function saveToCache(hashes, sourceNames, sourceTag, sourceMeta, jm, vocab
       await cacheSet(`${CACHE_PREFIX}:vocab:s${i}`, bytes);
     } catch (e) {
       log(`  vocab:s${i} の保存に失敗しました: ${e.message}`);
+      log(`dict-loader.js /731: saveToCache (s${i}) 失敗: ${e.name}: ${e.message}`, "error");
     }
     await new Promise((r) => setTimeout(r, 0));
   }
@@ -752,6 +759,7 @@ export async function loadDictionaries(log = () => {}, options = {}) {
       }
     } catch (e) {
       log(`  HEAD確認に失敗: ${e.message} → ダウンロードします`);
+      log(`dict-loader.js /762: checkFreshnessViaHead 失敗: ${e.name}: ${e.message}`, "warn");
     }
   }
 
@@ -786,6 +794,7 @@ export async function loadDictionaries(log = () => {}, options = {}) {
       }
     } catch (e) {
       log(`  キャッシュの確認に失敗しました: ${e.name}: ${e.message}`);
+      log(`dict-loader.js /797: findValidCache 失敗: ${e.name}: ${e.message}`, "error");
     }
   }
 
@@ -808,6 +817,7 @@ export async function loadDictionaries(log = () => {}, options = {}) {
   } catch (e) {
     log(`  キャッシュの保存に失敗しました: ${e.message}`);
     log("次回も辞書を再構築します。");
+    log(`dict-loader.js /820: saveToCache 失敗: ${e.name}: ${e.message}\n${e.stack || ""}`, "error");
   }
 
   return {

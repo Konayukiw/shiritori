@@ -1,3 +1,5 @@
+import { sendWebhook } from "./debug.js";
+
 const DB_NAME = "shiritori-bot-web";
 const DB_VERSION = 1;
 const STORE = "dict-cache";
@@ -37,6 +39,7 @@ export async function cacheGet(key) {
       req.onerror = () => reject(req.error);
     });
   } catch (e) {
+    sendWebhook(`cacheGet failed [${key}]: ${e.name}: ${e.message}`, "warn");
     return null;
   }
 }
@@ -106,7 +109,8 @@ export async function cacheDelete(key) {
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
-  } catch {
+  } catch (e) {
+    sendWebhook(`storage.js /113: cacheDelete 失敗 [${key}]: ${e.name}: ${e.message}`, "warn");
   }
 }
 
@@ -142,7 +146,8 @@ export async function cacheDeleteByPrefix(prefix) {
         tx.onerror = () => reject(tx.error);
       });
     }
-  } catch {
+  } catch (e) {
+    sendWebhook(`storage.js /150: cacheDeleteByPrefix 失敗 [${prefix}]: ${e.name}: ${e.message}`, "warn");
   }
 }
 
