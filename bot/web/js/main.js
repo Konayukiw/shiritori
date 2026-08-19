@@ -3,6 +3,7 @@ import { GameState } from "./game.js";
 import { loadDictionaries } from "./dict-loader.js";
 import { OpponentWordValidator } from "./validator.js";
 import { BotWordSelector } from "./selector.js";
+import { installGlobalWebhookLogging } from "./debug.js";
 
 const els = {
   logPane: document.getElementById("log-pane"),
@@ -183,6 +184,7 @@ async function submitWord(word) {
 }
 
 async function bootstrap() {
+  installGlobalWebhookLogging();
   setSetupMsg("語彙力の準備中…");
   try {
     const dicts = await loadDictionaries(setSetupMsg, {
