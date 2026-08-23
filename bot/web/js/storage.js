@@ -64,40 +64,54 @@ export async function cacheGet(key) {
   }
 }
 
-export async function cacheSet(key, value) {
-  const db = await openDb();
-  try {
-    await new Promise((resolve, reject) => {
-      let settled = false;
-      let tx = null;
-      const finish = (fn, arg) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        fn(arg);
-      };
-      const timer = setTimeout(() => {
-        try {
-          if (tx) tx.abort();
-        } catch {}
-        invalidateDb();
-        finish(reject, new Error(`cacheSet timeout: ${key}`));
-      }, TX_TIMEOUT_MS);
-
+function putOnce(db, key, value) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let tx = null;
+    const finish = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn(arg);
+    };
+    const timer = setTimeout(() => {
       try {
-        tx = db.transaction(STORE, "readwrite");
-        tx.objectStore(STORE).put(value, key);
-      } catch (e) {
-        finish(reject, e);
-        return;
-      }
-      tx.oncomplete = () => finish(resolve);
-      tx.onerror = () => finish(reject, tx.error || new Error("tx error"));
-      tx.onabort = () => finish(reject, tx.error || new Error("tx aborted"));
-    });
-  } catch (e) {
-    reportTxFailure("cacheSet", key, e);
-    throw e;
+        if (tx) tx.abort();
+      } catch {}
+      finish(reject, new Error(`cacheSet timeout: ${key}`));
+    }, TX_TIMEOUT_MS);
+
+    try {
+      tx = db.transaction(STORE, "readwrite");
+      tx.objectStore(STORE).put(value, key);
+    } catch (e) {
+      finish(reject, e);
+      return;
+    }
+    tx.oncomplete = () => finish(resolve);
+    tx.onerror = () => finish(reject, tx.error || new Error("tx error"));
+    tx.onabort = () => finish(reject, tx.error || new Error("tx aborted"));
+  });
+}
+
+export async function cacheSet(key, value) {
+  let db;
+  try {
+    db = await openDb();
+    return await putOnce(db, key, value);
+  } catch (first) {
+    if (first && first.name === "QuotaExceededError") {
+      reportTxFailure("cacheSet", key, first);
+      throw first;
+    }
+    invalidateDb();
+    try {
+      db = await openDb();
+      await putOnce(db, key, value);
+    } catch (second) {
+      reportTxFailure("cacheSet", key, second);
+      throw second;
+    }
   }
 }
 

@@ -1,4 +1,6 @@
 import {
+  Unzip,
+  UnzipInflate,
   unzipSync,
   strFromU8,
   strToU8,
@@ -59,6 +61,8 @@ const CODE_TO_CATEGORY = [
 
 const CACHE_PREFIX = "shiritori-web-v2";
 const NUM_SHARDS = 16;
+const STREAM_CHUNK_BYTES = 1 << 20;
+const SCAN_WINDOW_LIMIT = 64 << 20;
 
 function shardFor(mora) {
   let h = 0;
@@ -137,45 +141,392 @@ function unzipToJson(arrayBuffer) {
   return { name, data: JSON.parse(text) };
 }
 
-function* iterWordPairs(words, source) {
-  for (const word of words) {
-    const kanjiList = word.kanji || [];
-    const kanaList = word.kana || [];
-    if (!kanaList.length) continue;
+function isZipBytes(bytes) {
+  return (
+    bytes.length > 3 &&
+    bytes[0] === 0x50 &&
+    bytes[1] === 0x4b &&
+    (bytes[2] === 0x03 || bytes[2] === 0x05 || bytes[2] === 0x07)
+  );
+}
 
-    for (const kana of kanaList) {
-      const ktext = (kana.text || "").trim();
-      if (!ktext) continue;
-      const reading = toHiragana(normalizeReading(ktext));
-      if (reading) yield [ktext, reading, source];
+function decodeBytesToTextChunks(bytes, onText) {
+  const dec = new TextDecoder();
+  for (let pos = 0; pos < bytes.length; pos += STREAM_CHUNK_BYTES) {
+    const chunk = bytes.subarray(pos, Math.min(pos + STREAM_CHUNK_BYTES, bytes.length));
+    const text = dec.decode(chunk, { stream: true });
+    if (text) onText(text);
+  }
+  const tail = dec.decode();
+  if (tail) onText(tail);
+}
+
+function streamZipMemberText(arrayBuffer, preferExt, onText) {
+  return new Promise((resolve, reject) => {
+    let chosenName = null;
+    let finished = false;
+    let failure = null;
+    const dec = new TextDecoder();
+
+    const unzip = new Unzip((file) => {
+      if (file.name.endsWith("/")) return;
+      const matches =
+        !preferExt || file.name.toLowerCase().endsWith(preferExt);
+      if (matches && !chosenName) {
+        chosenName = file.name;
+        file.ondata = (err, data, final) => {
+          if (err) {
+            failure = failure || err;
+            return;
+          }
+          try {
+            const text = dec.decode(data, { stream: !final });
+            if (text) onText(text);
+            if (final) {
+              const tail = dec.decode();
+              if (tail) onText(tail);
+              finished = true;
+            }
+          } catch (e) {
+            failure = failure || e;
+          }
+        };
+      } else {
+        file.ondata = () => {};
+      }
+      file.start();
+    });
+    unzip.register(UnzipInflate);
+
+    const bytes = new Uint8Array(arrayBuffer);
+    let pos = 0;
+    const step = () => {
+      if (failure) return reject(failure);
+      if (pos >= bytes.length) {
+        if (!chosenName) {
+          return reject(new Error(`zip に ${preferExt || "ファイル"} がありません`));
+        }
+        if (!finished) {
+          return reject(new Error("zip メンバーの展開が完了しませんでした"));
+        }
+        return resolve(chosenName);
+      }
+      const end = Math.min(pos + STREAM_CHUNK_BYTES, bytes.length);
+      const final = end >= bytes.length;
+      try {
+        unzip.push(bytes.subarray(pos, end), final);
+      } catch (e) {
+        return reject(e);
+      }
+      pos = end;
+      setTimeout(step, 0);
+    };
+    step();
+  });
+}
+
+function createWordScanner(onWord) {
+  const S_ROOT = 0;
+  const S_KEY = 1;
+  const S_KEY_STR = 2;
+  const S_COLON = 3;
+  const S_VALUE = 4;
+  const S_VALUE_STR = 5;
+  const S_VALUE_BAL = 6;
+  const S_VALUE_LIT = 7;
+  const S_ARRAY = 8;
+  const S_ITEM = 9;
+  const S_DRAIN = 10;
+
+  let state = S_ROOT;
+  let buf = "";
+  let pos = 0;
+  let key = "";
+  let inStr = false;
+  let esc = false;
+  let balDepth = 0;
+  let itemStart = -1;
+  let itemDepth = 0;
+  let wordsClosed = false;
+
+  function fail(msg) {
+    throw new Error(`JMdict JSONの解析に失敗しました: ${msg}`);
+  }
+
+  function compact() {
+    const cut = state === S_ITEM && itemStart >= 0 ? itemStart : pos;
+    if (cut > STREAM_CHUNK_BYTES) {
+      buf = buf.slice(cut);
+      pos -= cut;
+      if (itemStart >= 0) itemStart -= cut;
     }
+  }
 
-    for (const kj of kanjiList) {
-      const stext = (kj.text || "").trim();
-      if (!stext) continue;
-      let chosen = null;
-      for (const kana of kanaList) {
-        const applies = kana.appliesToKanji || ["*"];
-        if (applies.includes("*") || applies.includes(stext)) {
-          chosen = kana.text || "";
-          break;
+  return {
+    push(text) {
+      buf += text;
+      if (buf.length - pos > SCAN_WINDOW_LIMIT) {
+        fail("バッファが異常に肥大化しました");
+      }
+      while (pos < buf.length) {
+        const c = buf[pos];
+        switch (state) {
+          case S_ROOT:
+            if (c === "{") {
+              pos += 1;
+              state = S_KEY;
+            } else if (c === " " || c === "\n" || c === "\t" || c === "\r") {
+              pos += 1;
+            } else {
+              fail("ルートがオブジェクトではありません");
+            }
+            break;
+
+          case S_KEY:
+            if (c === " " || c === "\n" || c === "\t" || c === "\r" || c === ",") {
+              pos += 1;
+            } else if (c === '"') {
+              pos += 1;
+              key = "";
+              inStr = true;
+              esc = false;
+              state = S_KEY_STR;
+            } else if (c === "}") {
+              pos += 1;
+              state = S_DRAIN;
+            } else {
+              fail(`トップレベルで不正な文字 '${c}'`);
+            }
+            break;
+
+          case S_KEY_STR:
+            if (esc) {
+              key += c;
+              esc = false;
+            } else if (c === "\\") {
+              esc = true;
+            } else if (c === '"') {
+              inStr = false;
+              state = S_COLON;
+            } else {
+              key += c;
+            }
+            pos += 1;
+            break;
+
+          case S_COLON:
+            if (c === " " || c === "\n" || c === "\t" || c === "\r") {
+              pos += 1;
+            } else if (c === ":") {
+              pos += 1;
+              state = S_VALUE;
+            } else {
+              fail(`キーの後に':'がありません ('${c}')`);
+            }
+            break;
+
+          case S_VALUE:
+            if (c === " " || c === "\n" || c === "\t" || c === "\r") {
+              pos += 1;
+            } else if (key === "words") {
+              if (c === "[") {
+                pos += 1;
+                state = S_ARRAY;
+              } else {
+                fail("words が配列ではありません");
+              }
+            } else if (c === '"') {
+              pos += 1;
+              inStr = true;
+              esc = false;
+              state = S_VALUE_STR;
+            } else if (c === "{") {
+              pos += 1;
+              balDepth = 1;
+              inStr = false;
+              esc = false;
+              state = S_VALUE_BAL;
+            } else if (c === "[") {
+              pos += 1;
+              balDepth = 1;
+              inStr = false;
+              esc = false;
+              state = S_VALUE_BAL;
+            } else if (c === "," || c === "}" || c === "]") {
+              fail("空の値");
+            } else {
+              state = S_VALUE_LIT;
+            }
+            break;
+
+          case S_VALUE_STR:
+            if (esc) {
+              esc = false;
+            } else if (c === "\\") {
+              esc = true;
+            } else if (c === '"') {
+              inStr = false;
+              state = S_KEY;
+            }
+            pos += 1;
+            break;
+
+          case S_VALUE_BAL:
+            if (inStr) {
+              if (esc) esc = false;
+              else if (c === "\\") esc = true;
+              else if (c === '"') inStr = false;
+            } else if (c === '"') {
+              inStr = true;
+            } else if (c === "{" || c === "[") {
+              balDepth += 1;
+            } else if (c === "}" || c === "]") {
+              balDepth -= 1;
+              if (balDepth === 0) {
+                state = S_KEY;
+              }
+            }
+            pos += 1;
+            break;
+
+          case S_VALUE_LIT:
+            if (c === "," || c === "}" || c === " " || c === "\n" || c === "\t" || c === "\r") {
+              state = S_KEY;
+            } else {
+              pos += 1;
+            }
+            break;
+
+          case S_ARRAY:
+            if (c === " " || c === "\n" || c === "\t" || c === "\r" || c === ",") {
+              pos += 1;
+            } else if (c === "]") {
+              pos += 1;
+              wordsClosed = true;
+              state = S_DRAIN;
+            } else if (c === "{") {
+              itemStart = pos;
+              itemDepth = 1;
+              inStr = false;
+              esc = false;
+              pos += 1;
+              state = S_ITEM;
+            } else {
+              fail(`words の要素がオブジェクトではありません ('${c}')`);
+            }
+            break;
+
+          case S_ITEM:
+            if (inStr) {
+              if (esc) esc = false;
+              else if (c === "\\") esc = true;
+              else if (c === '"') inStr = false;
+              pos += 1;
+            } else if (c === '"') {
+              inStr = true;
+              pos += 1;
+            } else if (c === "{" || c === "[") {
+              itemDepth += 1;
+              pos += 1;
+            } else if (c === "}" || c === "]") {
+              itemDepth -= 1;
+              pos += 1;
+              if (itemDepth === 0) {
+                const item = buf.slice(itemStart, pos);
+                onWord(JSON.parse(item));
+                state = S_ARRAY;
+              } else if (itemDepth < 0) {
+                fail("words の要素が壊れています");
+              }
+            } else {
+              pos += 1;
+            }
+            break;
+
+          case S_DRAIN:
+            pos = buf.length;
+            break;
         }
       }
-      if (!chosen && kanaList.length) {
-        chosen = kanaList[0].text || "";
+      compact();
+    },
+
+    end() {
+      if (!wordsClosed) {
+        fail('"words" 配列が見つかりませんでした');
       }
-      if (!chosen) continue;
-      const reading = toHiragana(normalizeReading(chosen));
-      if (reading) yield [stext, reading, source];
+    },
+  };
+}
+
+function createLineScanner(onLine) {
+  let buf = "";
+  return {
+    push(text) {
+      buf += text;
+      let start = 0;
+      for (;;) {
+        const nl = buf.indexOf("\n", start);
+        if (nl === -1) break;
+        let line = buf.slice(start, nl);
+        if (line.endsWith("\r")) line = line.slice(0, -1);
+        onLine(line);
+        start = nl + 1;
+      }
+      if (start > 0) buf = buf.slice(start);
+      if (buf.length > SCAN_WINDOW_LIMIT) {
+        throw new Error("CSV行バッファが異常に肥大化しました");
+      }
+    },
+    flush() {
+      const line = buf;
+      buf = "";
+      onLine(line);
+    },
+  };
+}
+
+function wordPairsOf(word, source) {
+  const out = [];
+  const kanjiList = word.kanji || [];
+  const kanaList = word.kana || [];
+  if (!kanaList.length) return out;
+
+  for (const kana of kanaList) {
+    const ktext = (kana.text || "").trim();
+    if (!ktext) continue;
+    const reading = toHiragana(normalizeReading(ktext));
+    if (reading) out.push([ktext, reading, source]);
+  }
+
+  for (const kj of kanjiList) {
+    const stext = (kj.text || "").trim();
+    if (!stext) continue;
+    let chosen = null;
+    for (const kana of kanaList) {
+      const applies = kana.appliesToKanji || ["*"];
+      if (applies.includes("*") || applies.includes(stext)) {
+        chosen = kana.text || "";
+        break;
+      }
     }
+    if (!chosen && kanaList.length) {
+      chosen = kanaList[0].text || "";
+    }
+    if (!chosen) continue;
+    const reading = toHiragana(normalizeReading(chosen));
+    if (reading) out.push([stext, reading, source]);
+  }
+  return out;
+}
+
+function* iterWordPairs(words, source) {
+  for (const word of words) {
+    yield* wordPairsOf(word, source);
   }
 }
 
-/**
- * @returns {{ bySurface: Map<string, object>, byReading: Map<string, object>, count: number }}
- */
-
-export function buildJmdictMaps(jmdictWords, jmnedictWords = null) {
+function createJmBuilder() {
   const bySurface = new Map();
   const byReading = new Map();
   let count = 0;
@@ -201,15 +552,31 @@ export function buildJmdictMaps(jmdictWords, jmnedictWords = null) {
     count += 1;
   }
 
+  return {
+    bySurface,
+    byReading,
+    add,
+    get count() {
+      return count;
+    },
+  };
+}
+
+/**
+ * @returns {{ bySurface: Map<string, object>, byReading: Map<string, object>, count: number }}
+ */
+
+export function buildJmdictMaps(jmdictWords, jmnedictWords = null) {
+  const builder = createJmBuilder();
   for (const pair of iterWordPairs(jmdictWords, "jmdict")) {
-    add(pair[0], pair[1], pair[2]);
+    builder.add(pair[0], pair[1], pair[2]);
   }
   if (jmnedictWords) {
     for (const pair of iterWordPairs(jmnedictWords, "jmnedict")) {
-      add(pair[0], pair[1], pair[2]);
+      builder.add(pair[0], pair[1], pair[2]);
     }
   }
-  return { bySurface, byReading, count };
+  return { bySurface: builder.bySurface, byReading: builder.byReading, count: builder.count };
 }
 
 function classifyPos(pos1, pos2, pos3) {
@@ -228,104 +595,115 @@ function classifyPos(pos1, pos2, pos3) {
   return null;
 }
 
-export function buildVocabFromSudachiCsv(csvText, log = () => {}) {
-
+function createVocabState() {
+  
   /** 
-   * @type {Map<string, Array<{surface:string, reading:string, category:string}>>} 
-   */
+   * @type {Map<string, Array<{surface:string, reading:string, category:string}>>}
+  */
 
   const byFirstMora = new Map();
   const seen = new Set();
-  let total = 0;
-  let skipped = 0;
-  let lineNo = 0;
+  return { byFirstMora, seen, total: 0, skipped: 0, lineNo: 0 };
+}
 
-  const lines = csvText.split(/\r?\n/);
-  const totalLines = lines.length;
-  log(`SudachiDictを解析中… (${totalLines.toLocaleString()} 行)`);
-
-  for (const line of lines) {
-    lineNo += 1;
-    if (!line) continue;
-    const row = parseCsvLine(line);
-    if (row.length < 12) {
-      skipped += 1;
-      continue;
-    }
-
-    let surface = (row[4] || row[0] || "").trim();
-    const readingRaw = (row[11] || "").trim();
-    const pos1 = (row[5] || "").trim();
-    const pos2 = (row[6] || "").trim();
-    const pos3 = (row[7] || "").trim();
-    const cform = (row[10] || "").trim();
-    const norm = (row[12] || "").trim();
-
-    if (!surface || !readingRaw || readingRaw === "*") {
-      skipped += 1;
-      continue;
-    }
-    if ((pos1 === "動詞" || pos1 === "形容詞") && !cform.startsWith("終止形")) {
-      skipped += 1;
-      continue;
-    }
-
-    const category = classifyPos(pos1, pos2, pos3);
-    if (category == null) {
-      skipped += 1;
-      continue;
-    }
-    if ((pos1 === "動詞" || pos1 === "形容詞") && norm && norm !== "*") {
-      surface = norm;
-    }
-    if (!isAllowedSurface(surface, false)) {
-      skipped += 1;
-      continue;
-    }
-
-    const reading = toHiragana(normalizeReading(readingRaw));
-    if (!reading) {
-      skipped += 1;
-      continue;
-    }
-    if (!isKanaOnlyReading(reading, false)) {
-      skipped += 1;
-      continue;
-    }
-    if (containsObsoleteKana(reading)) {
-      skipped += 1;
-      continue;
-    }
-    if (isOneMoraWord(reading)) {
-      skipped += 1;
-      continue;
-    }
-    if (endsWithN(reading)) {
-      skipped += 1;
-      continue;
-    }
-    if (seen.has(reading)) {
-      skipped += 1;
-      continue;
-    }
-    seen.add(reading);
-
-    const first = effectiveFirstMora(reading) || reading[0];
-    let bucket = byFirstMora.get(first);
-    if (!bucket) {
-      bucket = [];
-      byFirstMora.set(first, bucket);
-    }
-    bucket.push({ surface, reading, category });
-    total += 1;
-
-    if (lineNo % 200000 === 0) {
-      log(`  SudachiDict ${Math.floor((lineNo / totalLines) * 100)}% …`);
-    }
+function processSudachiLine(line, st) {
+  st.lineNo += 1;
+  if (!line) return;
+  const row = parseCsvLine(line);
+  if (row.length < 12) {
+    st.skipped += 1;
+    return;
   }
 
-  log(`  → 語彙 ${total.toLocaleString()} 語 (スキップ ${skipped.toLocaleString()})`);
-  return { byFirstMora, total };
+  let surface = (row[4] || row[0] || "").trim();
+  const readingRaw = (row[11] || "").trim();
+  const pos1 = (row[5] || "").trim();
+  const pos2 = (row[6] || "").trim();
+  const pos3 = (row[7] || "").trim();
+  const cform = (row[10] || "").trim();
+  const norm = (row[12] || "").trim();
+
+  if (!surface || !readingRaw || readingRaw === "*") {
+    st.skipped += 1;
+    return;
+  }
+  if ((pos1 === "動詞" || pos1 === "形容詞") && !cform.startsWith("終止形")) {
+    st.skipped += 1;
+    return;
+  }
+
+  const category = classifyPos(pos1, pos2, pos3);
+  if (category == null) {
+    st.skipped += 1;
+    return;
+  }
+  if ((pos1 === "動詞" || pos1 === "形容詞") && norm && norm !== "*") {
+    surface = norm;
+  }
+  if (!isAllowedSurface(surface, false)) {
+    st.skipped += 1;
+    return;
+  }
+
+  const reading = toHiragana(normalizeReading(readingRaw));
+  if (!reading) {
+    st.skipped += 1;
+    return;
+  }
+  if (!isKanaOnlyReading(reading, false)) {
+    st.skipped += 1;
+    return;
+  }
+  if (containsObsoleteKana(reading)) {
+    st.skipped += 1;
+    return;
+  }
+  if (isOneMoraWord(reading)) {
+    st.skipped += 1;
+    return;
+  }
+  if (endsWithN(reading)) {
+    st.skipped += 1;
+    return;
+  }
+  if (st.seen.has(reading)) {
+    st.skipped += 1;
+    return;
+  }
+  st.seen.add(reading);
+
+  const first = effectiveFirstMora(reading) || reading[0];
+  let bucket = st.byFirstMora.get(first);
+  if (!bucket) {
+    bucket = [];
+    st.byFirstMora.set(first, bucket);
+  }
+  bucket.push({ surface, reading, category });
+  st.total += 1;
+}
+
+export function buildVocabFromSudachiCsv(csvText, log = () => {}) {
+  const st = createVocabState();
+  log("SudachiDictを解析中…");
+  let start = 0;
+  for (;;) {
+    let nl = csvText.indexOf("\n", start);
+    let last = false;
+    if (nl === -1) {
+      nl = csvText.length;
+      last = true;
+    }
+    let line = csvText.slice(start, nl);
+    if (line.endsWith("\r")) line = line.slice(0, -1);
+    processSudachiLine(line, st);
+    if (st.lineNo % 200000 === 0) {
+      log(`  SudachiDict ${st.lineNo.toLocaleString()} 行…`);
+    }
+    if (last) break;
+    start = nl + 1;
+  }
+  log(`  → 語彙 ${st.total.toLocaleString()} 語 (スキップ ${st.skipped.toLocaleString()})`);
+  return { byFirstMora: st.byFirstMora, total: st.total };
 }
 
 function parseCsvLine(line) {
@@ -462,57 +840,110 @@ async function loadSudachiBuffer(log) {
   };
 }
 
-function parseJmdictSources(sources, log) {
-  let jmdictData;
-  if (sources.jmdict instanceof ArrayBuffer) {
-    try {
-      log("zipファイルを展開中…");
-      jmdictData = unzipToJson(sources.jmdict).data;
-    } catch {
-      jmdictData = JSON.parse(strFromU8(new Uint8Array(sources.jmdict)));
+async function streamJmdictWordsInto(arrayBuffer, source, builder, log, label) {
+  let seen = 0;
+  const onWord = (word) => {
+    for (const pair of wordPairsOf(word, source)) {
+      builder.add(pair[0], pair[1], pair[2]);
     }
-  } else {
-    jmdictData = sources.jmdict;
-  }
+    seen += 1;
+    if (seen % 200000 === 0) {
+      log(`  ${label} ${seen.toLocaleString()} 語…`);
+    }
+  };
 
-  let jmnedictData = null;
-  if (sources.jmnedict) {
+  const bytes = new Uint8Array(arrayBuffer);
+
+  if (isZipBytes(bytes)) {
     try {
-      if (sources.jmnedict instanceof ArrayBuffer) {
-        try {
-          log("zipファイルを展開中…");
-          jmnedictData = unzipToJson(sources.jmnedict).data;
-        } catch {
-          jmnedictData = JSON.parse(
-            strFromU8(new Uint8Array(sources.jmnedict))
-          );
-        }
-      } else {
-        jmnedictData = sources.jmnedict;
-      }
+      const scanner = createWordScanner(onWord);
+      await streamZipMemberText(arrayBuffer, ".json", (t) => scanner.push(t));
+      scanner.end();
+      return;
     } catch (e) {
-      log(`  JMnedictの解析をスキップ: ${e.message}`);
+      log(`  ${label}: ストリーム解析に失敗 (${e.message}) → 一括解析に切り替えます`);
+      sendWebhook(`dict-loader streamJmdictWordsInto(${label}) ストリーム失敗: ${e.name}: ${e.message}`, "warn");
     }
+    const { data } = unzipToJson(arrayBuffer);
+    for (const word of data.words || []) onWord(word);
+    return;
   }
 
-  log("JMdictインデックスを構築中…");
-  const maps = buildJmdictMaps(
-    jmdictData.words || [],
-    jmnedictData ? jmnedictData.words || [] : null
-  );
-  log(`  エントリ ${maps.count.toLocaleString()} 件`);
-  return maps;
+  try {
+    const scanner = createWordScanner(onWord);
+    decodeBytesToTextChunks(bytes, (t) => scanner.push(t));
+    scanner.end();
+  } catch (e) {
+    log(`  ${label}: ストリーム解析に失敗 (${e.message}) → 一括解析に切り替えます`);
+    sendWebhook(`dict-loader streamJmdictWordsInto(${label}) raw失敗: ${e.name}: ${e.message}`, "warn");
+    const data = JSON.parse(strFromU8(bytes));
+    for (const word of data.words || []) onWord(word);
+  }
 }
 
-function parseSudachiSource(sudachi, log) {
-  let csvText;
-  if (sudachi.url.endsWith(".csv") || sudachi.url.includes("small_lex.csv")) {
-    csvText = strFromU8(new Uint8Array(sudachi.data));
-  } else {
-    log("zipファイルを展開中…");
-    csvText = unzipToText(sudachi.data, ".csv").text;
+async function parseJmdictSources(sources, log) {
+  const builder = createJmBuilder();
+
+  log("JMdictインデックスを構築中…");
+  if (sources.jmdict) {
+    await streamJmdictWordsInto(sources.jmdict, "jmdict", builder, log, "JMdict");
   }
-  return buildVocabFromSudachiCsv(csvText, log);
+  if (sources.jmnedict) {
+    await streamJmdictWordsInto(sources.jmnedict, "jmnedict", builder, log, "JMnedict");
+  }
+  log(`  エントリ ${builder.count.toLocaleString()} 件`);
+  return {
+    bySurface: builder.bySurface,
+    byReading: builder.byReading,
+    count: builder.count,
+  };
+}
+
+async function parseSudachiSource(sudachi, log) {
+  const st = createVocabState();
+  const onLine = (line) => {
+    processSudachiLine(line, st);
+    if (st.lineNo % 200000 === 0) {
+      log(`  SudachiDict ${st.lineNo.toLocaleString()} 行…`);
+    }
+  };
+  const lines = createLineScanner(onLine);
+  const bytes = new Uint8Array(sudachi.data);
+
+  const finish = () => {
+    log(`  → 語彙 ${st.total.toLocaleString()} 語 (スキップ ${st.skipped.toLocaleString()})`);
+    return { byFirstMora: st.byFirstMora, total: st.total };
+  };
+
+  log("SudachiDictを解析中…");
+
+  const isCsvUrl =
+    sudachi.url.endsWith(".csv") || sudachi.url.includes("small_lex.csv");
+
+  if (isZipBytes(bytes) && !isCsvUrl) {
+    try {
+      await streamZipMemberText(sudachi.data, ".csv", (t) => lines.push(t));
+      lines.flush();
+      return finish();
+    } catch (e) {
+      log(`  SudachiDict: ストリーム解析に失敗 (${e.message}) → 一括解析に切り替えます`);
+      sendWebhook(`dict-loader parseSudachiSource ストリーム失敗: ${e.name}: ${e.message}`, "warn");
+    }
+    const { text } = unzipToText(sudachi.data, ".csv");
+    for (const line of text.split(/\r?\n/)) onLine(line);
+    return finish();
+  }
+
+  try {
+    decodeBytesToTextChunks(bytes, (t) => lines.push(t));
+    lines.flush();
+  } catch (e) {
+    log(`  SudachiDict: ストリーム解析に失敗 (${e.message}) → 一括解析に切り替えます`);
+    sendWebhook(`dict-loader parseSudachiSource raw失敗: ${e.name}: ${e.message}`, "warn");
+    const text = strFromU8(bytes);
+    for (const line of text.split(/\r?\n/)) onLine(line);
+  }
+  return finish();
 }
 
 async function computeSha256Hex(buffer) {
@@ -652,13 +1083,52 @@ async function loadFromCache(log) {
   return { bySurface, byReading, pool };
 }
 
+function buildJmShard(jm, si) {
+  const shard = {};
+  for (const [key, hit] of jm.bySurface) {
+    const mora = effectiveFirstMora(hit.reading) || hit.reading[0] || "_";
+    if (shardFor(mora) !== si) continue;
+    if (!shard[mora]) shard[mora] = { s: [], r: [] };
+    shard[mora].s.push([
+      key,
+      hit.reading,
+      SOURCE_TO_CODE[hit.source] ?? 0,
+    ]);
+  }
+  for (const [key, hit] of jm.byReading) {
+    const mora = effectiveFirstMora(key) || key[0] || "_";
+    if (shardFor(mora) !== si) continue;
+    if (!shard[mora]) shard[mora] = { s: [], r: [] };
+    shard[mora].r.push([
+      key,
+      hit.surface,
+      hit.reading,
+      SOURCE_TO_CODE[hit.source] ?? 0,
+    ]);
+  }
+  return shard;
+}
+
+function buildVocabShard(vocab, si) {
+  const shard = {};
+  for (const [mora, bucket] of vocab.byFirstMora) {
+    if (shardFor(mora) !== si) continue;
+    shard[mora] = bucket.map((w) => [
+      w.reading,
+      w.surface,
+      CATEGORY_TO_CODE[w.category] ?? 6,
+    ]);
+  }
+  return shard;
+}
+
 async function saveToCache(hashes, sourceNames, sourceTag, sourceMeta, jm, vocab, log) {
   const estimate = await storageEstimate();
   const available = estimate.quota - estimate.usage;
   if (available < 30 * 1024 * 1024) {
     log(`  空き容量不足 (${(available / 1024 / 1024).toFixed(0)} MB) → キャッシュをスキップします`);
     log(
-      `dict-loader.js /655: saveToCacheが空き容量不足により失敗しました。 Available=${(available / 1024 / 1024).toFixed(0)}MB Quota=${(estimate.quota / 1024 / 1024).toFixed(0)}MB Usage=${(estimate.usage / 1024 / 1024).toFixed(0)}MB`,
+      `dict-loader saveToCache: 空き容量不足によりスキップ。 Available=${(available / 1024 / 1024).toFixed(0)}MB Quota=${(estimate.quota / 1024 / 1024).toFixed(0)}MB Usage=${(estimate.usage / 1024 / 1024).toFixed(0)}MB`,
       "warn"
     );
     return;
@@ -668,6 +1138,34 @@ async function saveToCache(hashes, sourceNames, sourceTag, sourceMeta, jm, vocab
   await cacheDeleteByPrefix(CACHE_PREFIX);
   await cacheDeleteByPrefix("shiritori-web-dict-v1");
 
+  log(`  ${NUM_SHARDS} シャード x2 を書き込み中…`);
+
+  for (let si = 0; si < NUM_SHARDS; si++) {
+    const bytes = zlibSync(strToU8(JSON.stringify(buildJmShard(jm, si))), {
+      level: 6,
+    });
+    try {
+      await cacheSet(`${CACHE_PREFIX}:jmdict:s${si}`, bytes);
+    } catch (e) {
+      log(`  jmdict:s${si} の保存に失敗しました: ${e.message}`);
+      log(`dict-loader saveToCache (jmdict s${si}) 失敗: ${e.name}: ${e.message}`, "error");
+    }
+    await new Promise((r) => setTimeout(r, 0));
+  }
+
+  for (let si = 0; si < NUM_SHARDS; si++) {
+    const bytes = zlibSync(strToU8(JSON.stringify(buildVocabShard(vocab, si))), {
+      level: 6,
+    });
+    try {
+      await cacheSet(`${CACHE_PREFIX}:vocab:s${si}`, bytes);
+    } catch (e) {
+      log(`  vocab:s${si} の保存に失敗しました: ${e.message}`);
+      log(`dict-loader saveToCache (vocab s${si}) 失敗: ${e.name}: ${e.message}`, "error");
+    }
+    await new Promise((r) => setTimeout(r, 0));
+  }
+
   await cacheSet(`${CACHE_PREFIX}:meta`, {
     hashes,
     sources: sourceNames,
@@ -675,63 +1173,6 @@ async function saveToCache(hashes, sourceNames, sourceTag, sourceMeta, jm, vocab
     sourceMeta,
     savedAt: Date.now(),
   });
-
-  log(`  ${NUM_SHARDS} シャード x2 を書き込み中…`);
-
-  const jmShards = Array.from({ length: NUM_SHARDS }, () => ({}));
-  for (const [key, hit] of jm.bySurface) {
-    const mora = effectiveFirstMora(hit.reading) || hit.reading[0] || "_";
-    const si = shardFor(mora);
-    if (!jmShards[si][mora]) jmShards[si][mora] = { s: [], r: [] };
-    jmShards[si][mora].s.push([
-      key,
-      hit.reading,
-      SOURCE_TO_CODE[hit.source] ?? 0,
-    ]);
-  }
-  for (const [key, hit] of jm.byReading) {
-    const mora = effectiveFirstMora(key) || key[0] || "_";
-    const si = shardFor(mora);
-    if (!jmShards[si][mora]) jmShards[si][mora] = { s: [], r: [] };
-    jmShards[si][mora].r.push([
-      key,
-      hit.surface,
-      hit.reading,
-      SOURCE_TO_CODE[hit.source] ?? 0,
-    ]);
-  }
-  for (let i = 0; i < NUM_SHARDS; i++) {
-    const bytes = zlibSync(strToU8(JSON.stringify(jmShards[i])), { level: 6 });
-    try {
-      await cacheSet(`${CACHE_PREFIX}:jmdict:s${i}`, bytes);
-    } catch (e) {
-      log(`  jmdict:s${i} の保存に失敗しました: ${e.message}`);
-      log(`dict-loader.js /709: saveToCache (s${i}) 失敗: ${e.name}: ${e.message}`, "error");
-    }
-    await new Promise((r) => setTimeout(r, 0));
-  }
-
-  const vocabShards = Array.from({ length: NUM_SHARDS }, () => ({}));
-  for (const [mora, bucket] of vocab.byFirstMora) {
-    const si = shardFor(mora);
-    vocabShards[si][mora] = bucket.map((w) => [
-      w.reading,
-      w.surface,
-      CATEGORY_TO_CODE[w.category] ?? 6,
-    ]);
-  }
-  for (let i = 0; i < NUM_SHARDS; i++) {
-    const bytes = zlibSync(strToU8(JSON.stringify(vocabShards[i])), {
-      level: 6,
-    });
-    try {
-      await cacheSet(`${CACHE_PREFIX}:vocab:s${i}`, bytes);
-    } catch (e) {
-      log(`  vocab:s${i} の保存に失敗しました: ${e.message}`);
-      log(`dict-loader.js /731: saveToCache (s${i}) 失敗: ${e.name}: ${e.message}`, "error");
-    }
-    await new Promise((r) => setTimeout(r, 0));
-  }
 }
 
 /**
@@ -759,7 +1200,7 @@ export async function loadDictionaries(log = () => {}, options = {}) {
       }
     } catch (e) {
       log(`  HEAD確認に失敗: ${e.message} → ダウンロードします`);
-      log(`dict-loader.js /762: checkFreshnessViaHead 失敗: ${e.name}: ${e.message}`, "warn");
+      log(`dict-loader checkFreshnessViaHead 失敗: ${e.name}: ${e.message}`, "warn");
     }
   }
 
@@ -794,13 +1235,13 @@ export async function loadDictionaries(log = () => {}, options = {}) {
       }
     } catch (e) {
       log(`  キャッシュの確認に失敗しました: ${e.name}: ${e.message}`);
-      log(`dict-loader.js /797: findValidCache 失敗: ${e.name}: ${e.message}`, "error");
+      log(`dict-loader findValidCache 失敗: ${e.name}: ${e.message}`, "error");
     }
   }
 
   log("語彙を構築中…");
-  const jm = parseJmdictSources(jmBuffers, log);
-  const vocab = parseSudachiSource(sudachiBuffer, log);
+  const jm = await parseJmdictSources(jmBuffers, log);
+  const vocab = await parseSudachiSource(sudachiBuffer, log);
 
   const sourceMeta = { ...jmBuffers.sourceMeta, sudachi: sudachiBuffer.sourceMeta };
 
@@ -817,7 +1258,7 @@ export async function loadDictionaries(log = () => {}, options = {}) {
   } catch (e) {
     log(`  キャッシュの保存に失敗しました: ${e.message}`);
     log("次回も辞書を再構築します。");
-    log(`dict-loader.js /820: saveToCache 失敗: ${e.name}: ${e.message}\n${e.stack || ""}`, "error");
+    log(`dict-loader saveToCache 失敗: ${e.name}: ${e.message}\n${e.stack || ""}`, "error");
   }
 
   return {
