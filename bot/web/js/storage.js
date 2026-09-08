@@ -1,5 +1,3 @@
-import { sendWebhook } from "./debug.js";
-
 const DB_NAME = "shiritori-bot-web";
 const DB_VERSION = 1;
 const STORE = "dict-cache";
@@ -7,12 +5,6 @@ const TX_TIMEOUT_MS = 15000;
 
 let dbPromise = null;
 let dbGeneration = 0;
-
-function reportTxFailure(context, key, e) {
-  const name = e && e.name ? e.name : "UnknownError";
-  const msg = e && e.message ? e.message : String(e);
-  sendWebhook(`storage.js ${context} 失敗 [${key}]: ${name}: ${msg}`, "warn");
-}
 
 function invalidateDb() {
   dbPromise = null;
@@ -58,8 +50,7 @@ export async function cacheGet(key) {
       req.onsuccess = () => resolve(req.result ?? null);
       req.onerror = () => reject(req.error);
     });
-  } catch (e) {
-    reportTxFailure("cacheGet", key, e);
+  } catch {
     return null;
   }
 }
@@ -101,24 +92,17 @@ export async function cacheSet(key, value) {
     return await putOnce(db, key, value);
   } catch (first) {
     if (first && first.name === "QuotaExceededError") {
-      reportTxFailure("cacheSet", key, first);
       throw first;
     }
     invalidateDb();
     try {
       db = await openDb();
-      await putOnce(db, key, value);
+      return await putOnce(db, key, value);
     } catch (second) {
-      reportTxFailure("cacheSet", key, second);
       throw second;
     }
   }
 }
-
-/**
- * @param {Array<[string, any]>} entries
- * @param {(key: string, error: Error) => void} [onError]
- */
 
 export async function cacheDelete(key) {
   try {
@@ -130,8 +114,7 @@ export async function cacheDelete(key) {
       tx.onerror = () => reject(tx.error);
       tx.onabort = () => reject(tx.error || new Error("transaction aborted"));
     });
-  } catch (e) {
-    reportTxFailure("cacheDelete", key, e);
+  } catch {
   }
 }
 
@@ -144,8 +127,7 @@ export async function cacheKeys() {
       req.onsuccess = () => resolve(req.result || []);
       req.onerror = () => reject(req.error);
     });
-  } catch (e) {
-    reportTxFailure("cacheKeys", "(all)", e);
+  } catch {
     return [];
   }
 }
@@ -170,8 +152,7 @@ export async function cacheDeleteByPrefix(prefix) {
       tx.onerror = () => reject(tx.error);
       tx.onabort = () => reject(tx.error || new Error("transaction aborted"));
     });
-  } catch (e) {
-    reportTxFailure("cacheDeleteByPrefix", prefix, e);
+  } catch {
   }
 }
 

@@ -29,7 +29,6 @@ import {
   storagePersist,
   storageEstimate,
 } from "./storage.js";
-import { sendWebhook, markStage } from "./debug.js";
 import { JmdictIndex } from "./validator.js";
 import { VocabPool } from "./selector.js";
 
@@ -581,8 +580,7 @@ function createShardWriter({ gen, log, enabled }) {
           if (Array.isArray(payload.s)) sMap = new Map(payload.s);
           if (Array.isArray(payload.r)) rMap = new Map(payload.r);
         }
-      } catch (e) {
-        sendWebhook(`dict-loader jm shard s${si} 再読に失敗: ${e && e.message}`, "warn");
+      } catch {
       }
     }
     let insertedS = 0;
@@ -623,8 +621,7 @@ function createShardWriter({ gen, log, enabled }) {
         if (payload.gen === gen && Array.isArray(payload.mora)) {
           moraMap = new Map(payload.mora);
         }
-      } catch (e) {
-        sendWebhook(`シャード s${si} 再読み込みに失敗: ${e && e.message}`, "warn");
+      } catch {
       }
     }
     let inserted = 0;
@@ -655,9 +652,8 @@ function createShardWriter({ gen, log, enabled }) {
       } catch (e) {
         degraded = true;
         spillPendingToEager();
-        sendWebhook(
-          `シャード書き込み失敗 (s${si}): ${e && e.name}: ${e && e.message}。RAMモードで継続`,
-          "warn"
+        log(
+          `  シャード書き込みに失敗したためRAMモードで継続します (s${si}: ${e && e.message})`
         );
         return;
       }
@@ -723,14 +719,11 @@ function createJmIdbLoader({ gen }) {
       let payload = null;
       try {
         payload = JSON.parse(strFromU8(unzlibSync(raw)));
-      } catch (e) {
-        sendWebhook(`シャード s${si} の解凍に失敗: ${e && e.message}`, "warn");
+      } catch {
       }
       if (payload && payload.gen === gen) {
         if (Array.isArray(payload.s)) shard.s = new Map(payload.s);
         if (Array.isArray(payload.r)) shard.r = new Map(payload.r);
-      } else if (payload) {
-        sendWebhook(`シャード s${si} の不一致 (raw=${payload.gen} gen=${gen})`, "warn");
       }
     }
     lru.set(si, shard);
@@ -804,13 +797,10 @@ function createVocabIdbLoader({ gen }) {
       let payload = null;
       try {
         payload = JSON.parse(strFromU8(unzlibSync(raw)));
-      } catch (e) {
-        sendWebhook(`シャード s${si} の解凍に失敗: ${e && e.message}`, "warn");
+      } catch {
       }
       if (payload && payload.gen === gen && Array.isArray(payload.mora)) {
         shard.mora = new Map(payload.mora);
-      } else if (payload) {
-        sendWebhook(`シャード s${si} の不一致 (raw=${payload.gen} gen=${gen})`, "warn");
       }
     }
     lru.set(si, shard);
@@ -969,7 +959,6 @@ async function checkFreshnessViaHead(log) {
 }
 
 async function tryLoadFromCache(log, { includeJmnedict }) {
-  markStage("cache:head-check");
   const meta = await checkFreshnessViaHead(log);
   if (!meta) return null;
 
@@ -1078,21 +1067,13 @@ async function streamJmdictWordsInto(arrayBuffer, source, writer, log, label) {
   const bytes = new Uint8Array(arrayBuffer);
   const onChunk = () => writer.flushIfHeavy();
 
-  try {
-    if (isZipBytes(bytes)) {
-      await streamZipMemberText(arrayBuffer, ".json", (t) => scanner.push(t), onChunk);
-      scanner.end();
-      return;
-    }
-    await decodeBytesToTextChunks(bytes, (t) => scanner.push(t), onChunk);
+  if (isZipBytes(bytes)) {
+    await streamZipMemberText(arrayBuffer, ".json", (t) => scanner.push(t), onChunk);
     scanner.end();
-  } catch (e) {
-    sendWebhook(
-      `dict-loader streamJmdictWordsInto(${label}) 失敗: ${e && e.name}: ${e && e.message}`,
-      "error"
-    );
-    throw e;
+    return;
   }
+  await decodeBytesToTextChunks(bytes, (t) => scanner.push(t), onChunk);
+  scanner.end();
 }
 
 async function parseSudachiInto(sudachiData, url, writer, log) {
@@ -1111,20 +1092,12 @@ async function parseSudachiInto(sudachiData, url, writer, log) {
   const isCsvUrl =
     url.endsWith(".csv") || url.includes("small_lex.csv");
 
-  try {
-    if (isZipBytes(bytes) && !isCsvUrl) {
-      await streamZipMemberText(sudachiData, ".csv", (t) => lines.push(t), onChunk);
-      lines.flush();
-    } else {
-      await decodeBytesToTextChunks(bytes, (t) => lines.push(t), onChunk);
-      lines.flush();
-    }
-  } catch (e) {
-    sendWebhook(
-      `dict-loader parseSudachiInto 失敗: ${e && e.name}: ${e && e.message}`,
-      "error"
-    );
-    throw e;
+  if (isZipBytes(bytes) && !isCsvUrl) {
+    await streamZipMemberText(sudachiData, ".csv", (t) => lines.push(t), onChunk);
+    lines.flush();
+  } else {
+    await decodeBytesToTextChunks(bytes, (t) => lines.push(t), onChunk);
+    lines.flush();
   }
 
   log(`  → 語彙 ${st.total.toLocaleString()} 語 (スキップ ${st.skipped.toLocaleString()})`);
@@ -1211,26 +1184,20 @@ export async function loadDictionaries(log = () => {}, options = {}) {
 
   if (typeof crypto === "undefined" || !crypto.subtle) {
     throw new Error(
-      "この環境では crypto.subtle (SHA-256) を利用できません。HTTPS または localhost でページを開いてください。"
+      "この環境では Crypto Subtle (SHA-256) を利用できません。HTTPS サーバーでページを開いてください。"
     );
   }
 
   await storagePersist();
-  markStage("load-start");
 
   if (!forceReload) {
     try {
       const cached = await tryLoadFromCache(log, { includeJmnedict });
       if (cached) {
-        markStage("cache:ready");
         return cached;
       }
     } catch (e) {
-      log(`  キャッシュの確認に失敗: ${e.message} → 再構築します`);
-      sendWebhook(
-        `dict-loader tryLoadFromCache 失敗: ${e && e.name}: ${e && e.message}`,
-        "warn"
-      );
+      log(`  キャッシュの確認に失敗: ${e.message}。再構築します`);
     }
   }
 
@@ -1248,7 +1215,7 @@ export async function loadDictionaries(log = () => {}, options = {}) {
   const cacheEnabled = available >= MIN_CACHE_FREE_BYTES;
   if (!cacheEnabled) {
     log(
-      `  空き容量不足 (${(available / 1024 / 1024).toFixed(0)} MB) → キャッシュなしで動作します`
+      `  空き容量不足 (${(available / 1024 / 1024).toFixed(0)} MB)。キャッシュなしで動作します`
     );
   }
   const writer = createShardWriter({ gen, log, enabled: cacheEnabled });
@@ -1258,19 +1225,16 @@ export async function loadDictionaries(log = () => {}, options = {}) {
   let sourceTag = "local";
   const jmState = { urls: null, tag: null };
 
-  markStage("rebuild:fetch-jmdict");
   const jmdictSource = await acquireJmSource(log, "jmdict", jmState);
   if (jmState.tag) sourceTag = jmState.tag;
   sourceMeta.jmdict = jmdictSource.meta;
   hashes.jmdict = await computeSha256Hex(jmdictSource.data);
 
-  markStage("rebuild:parse-jmdict");
-  log("JMdictインデックスを構築中…");
+  log("JMdict インデックスを構築中…");
   await streamJmdictWordsInto(jmdictSource.data, "jmdict", writer, log, "JMdict");
   log(`  エントリ ${(writer.counts.jmSurface + writer.counts.jmReading).toLocaleString()} 件`);
   jmdictSource.data = null;
 
-  markStage("rebuild:fetch-jmnedict");
   let jmnedictData = null;
   try {
     const jmnedictSource = await acquireJmSource(log, "jmnedict", jmState);
@@ -1281,22 +1245,18 @@ export async function loadDictionaries(log = () => {}, options = {}) {
     }
   } catch (e) {
     log(`  JMnedictの取得に失敗: ${e.message}`);
-    sendWebhook(`dict-loader jmnedict取得失敗: ${e && e.name}: ${e && e.message}`, "warn");
   }
 
   if (jmnedictData) {
-    markStage("rebuild:parse-jmnedict");
     await streamJmdictWordsInto(jmnedictData, "jmnedict", writer, log, "JMnedict");
     log(`  エントリ ${(writer.counts.jmSurface + writer.counts.jmReading).toLocaleString()} 件`);
     jmnedictData = null;
   }
 
-  markStage("rebuild:fetch-sudachi");
   const sudachi = await loadSudachiSource(log);
   sourceMeta.sudachi = sudachi.meta;
   hashes.sudachi = await computeSha256Hex(sudachi.data);
 
-  markStage("rebuild:parse-sudachi");
   await parseSudachiInto(sudachi.data, sudachi.url, writer, log);
   sudachi.data = null;
 
@@ -1305,7 +1265,6 @@ export async function loadDictionaries(log = () => {}, options = {}) {
     log(`  ${name}: ${hex.slice(0, 12)}…`);
   }
 
-  markStage("rebuild:save-cache");
   let finalizeResult = null;
   try {
     finalizeResult = await writer.finalize({
@@ -1317,13 +1276,8 @@ export async function loadDictionaries(log = () => {}, options = {}) {
   } catch (e) {
     log(`  キャッシュの保存に失敗しました: ${e.message}`);
     log("次回も辞書を再構築します。");
-    sendWebhook(
-      `dict-loader saveToCache 失敗: ${e && e.name}: ${e && e.message}\n${(e && e.stack) || ""}`,
-      "error"
-    );
     finalizeResult = { degraded: true, ...writer.getEagerFallback() };
   }
-  markStage("rebuild:done");
 
   if (finalizeResult && !finalizeResult.degraded) {
     return {
@@ -1339,7 +1293,7 @@ export async function loadDictionaries(log = () => {}, options = {}) {
   const eager = finalizeResult
     ? finalizeResult
     : writer.getEagerFallback();
-  log("  キャッシュ無効のためRAM併用モードで動作します (次回起動時に再構築)");
+  log("  キャッシュ無効のためRAMを使用して動作します。キャッシュは次回起動時に再構築されます。");
 
   const idbJmLoader = createJmIdbLoader({ gen });
   const eagerLoader = createEagerJmLoader(eager.eagerJm);

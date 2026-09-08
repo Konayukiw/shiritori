@@ -3,12 +3,6 @@ import { GameState } from "./game.js";
 import { loadDictionaries } from "./dict-loader.js";
 import { OpponentWordValidator } from "./validator.js";
 import { BotWordSelector } from "./selector.js";
-import {
-  installGlobalWebhookLogging,
-  sendWebhook,
-  markStage,
-  consumeCrashMarker,
-} from "./debug.js";
 
 const els = {
   logPane: document.getElementById("log-pane"),
@@ -197,24 +191,11 @@ if (new URLSearchParams(location.search).has("debug")) {
 }
 
 async function bootstrap() {
-  installGlobalWebhookLogging();
-
-  const crashed = consumeCrashMarker();
-  if (crashed) {
-    const secs = Math.round((Date.now() - crashed.t) / 1000);
-    sendWebhook(
-      `前回のセッションは "${crashed.stage}" の ${secs}秒後に応答を失いました (タブクラッシュの可能性)`,
-      "error"
-    );
-  }
-
-  markStage("bootstrap");
   setSetupMsg("語彙力の準備中…");
   try {
     const dicts = await loadDictionaries(setSetupMsg, {
       includeJmnedict: true,
     });
-    markStage("game-setup");
     const config = readConfigFromUi();
     const game = new GameState(config);
     app = {
@@ -226,7 +207,6 @@ async function bootstrap() {
       game,
     };
     setupDone = true;
-    markStage("load-complete");
     els.setupOverlay.classList.add("hidden");
     setInputEnabled(true);
     log("システム", "しりとりBot へようこそ！");
