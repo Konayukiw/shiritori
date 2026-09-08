@@ -120,25 +120,6 @@ export async function cacheSet(key, value) {
  * @param {(key: string, error: Error) => void} [onError]
  */
 
-export async function cachePutSeries(entries, onError) {
-  const db = await openDb();
-  for (const [key, value] of entries) {
-    try {
-      await new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE, "readwrite");
-        tx.objectStore(STORE).put(value, key);
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-        tx.onabort = () => reject(tx.error || new Error("transaction aborted"));
-      });
-    } catch (e) {
-      reportTxFailure("cachePutSeries", key, e);
-      if (onError) onError(key, e);
-    }
-    await new Promise((r) => setTimeout(r, 0));
-  }
-}
-
 export async function cacheDelete(key) {
   try {
     const db = await openDb();

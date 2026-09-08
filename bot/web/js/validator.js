@@ -16,48 +16,63 @@ import { jmnedictAllowed } from "./config.js";
  */
 
 export class JmdictIndex {
+
   /**
-   * @param {Map<string, DictHit>} bySurface
-   * @param {Map<string, DictHit>} byReading
+   * @param {{
+   *   lookupSurface: (surface: string) => Promise<DictHit|null>,
+   *   lookupReading: (reading: string) => Promise<DictHit|null>,
+   * }} loader
    */
-  constructor(bySurface, byReading) {
-    this.bySurface = bySurface;
-    this.byReading = byReading;
+
+  constructor(loader) {
+    this._loader = loader;
   }
 
   /**
    * @param {string} surface
    * @param {string|null} readingHint
-   * @returns {DictHit|null}
+   * @returns {Promise<DictHit|null>}
    */
-  lookup(surface, readingHint = null) {
-    const hit = this.bySurface.get(surface);
-    if (hit) return hit;
+  
+  async lookup(surface, readingHint = null) {
+    const bySurface = await this._loader.lookupSurface(surface);
+    if (bySurface) return bySurface;
 
     const reading =
       readingHint != null ? readingHint : normalizeReading(surface);
     if (reading && reading !== surface) {
-      const byR = this.byReading.get(reading);
+      const byR = await this._loader.lookupReading(reading);
       if (byR) return byR;
     }
 
-    const byNorm = this.byReading.get(normalizeReading(surface));
-    if (byNorm) return byNorm;
+    const norm = normalizeReading(surface);
+    if (norm && norm !== reading) {
+      const byNorm = await this._loader.lookupReading(norm);
+      if (byNorm) return byNorm;
+    }
     return null;
   }
 }
 
 export class OpponentWordValidator {
+
   /**
    * @param {JmdictIndex} index
    * @param {object} config
    */
+
   constructor(index, config) {
     this.index = index;
     this.config = config;
   }
 
-  validate(userInput, { expectedLastMora, usedReadings }) {
+  /**
+   * @param {string} userInput
+   * @param {{ expectedLastMora: string|null, usedReadings: Set<string> }} ctx
+   * @returns {Promise<object>}
+   */
+
+  async validate(userInput, { expectedLastMora, usedReadings }) {
     const surface = userInput.trim();
     if (!surface) {
       return { ok: false, reason: "単語を入力してください" };
@@ -72,14 +87,14 @@ export class OpponentWordValidator {
       };
     }
 
-    let found = this.index.lookup(surface);
+    let found = await this.index.lookup(surface);
     if (!found) {
       const normalized = normalizeReading(surface);
       if (normalized !== surface) {
-        found = this.index.lookup(surface, normalized);
+        found = await this.index.lookup(surface, normalized);
       }
       if (!found && normalized) {
-        found = this.index.lookup(normalized);
+        found = await this.index.lookup(normalized);
       }
     }
 

@@ -1,7 +1,6 @@
 import {
   Unzip,
   UnzipInflate,
-  unzipSync,
   strFromU8,
   strToU8,
   zlibSync,
@@ -24,18 +23,15 @@ import {
 import {
   cacheGet,
   cacheSet,
+  cacheDelete,
   cacheKeys,
   cacheDeleteByPrefix,
   storagePersist,
   storageEstimate,
 } from "./storage.js";
-import { sendWebhook } from "./debug.js";
+import { sendWebhook, markStage } from "./debug.js";
 import { JmdictIndex } from "./validator.js";
 import { VocabPool } from "./selector.js";
-
-/**
- * @typedef {(msg: string) => void} LogFn
- */
 
 const SOURCE_TO_CODE = { jmdict: 0, jmnedict: 1 };
 const CODE_TO_SOURCE = ["jmdict", "jmnedict"];
@@ -59,10 +55,16 @@ const CODE_TO_CATEGORY = [
   "other",
 ];
 
-const CACHE_PREFIX = "shiritori-web-v2";
+const CACHE_PREFIX = "shiritori-web-v3";
+const LEGACY_PREFIXES = ["shiritori-web-v2", "shiritori-web-dict-v1"];
 const NUM_SHARDS = 16;
 const STREAM_CHUNK_BYTES = 1 << 20;
 const SCAN_WINDOW_LIMIT = 64 << 20;
+const FLUSH_THRESHOLD = 600_000;
+const ZLIB_LEVEL = 1;
+const JM_SHARD_LRU = 4;
+const VOCAB_SHARD_LRU = 3;
+const MIN_CACHE_FREE_BYTES = 60 * 1024 * 1024;
 
 function shardFor(mora) {
   let h = 0;
@@ -70,33 +72,20 @@ function shardFor(mora) {
   return h % NUM_SHARDS;
 }
 
+function yieldToEvents() {
+  return new Promise((r) => setTimeout(r, 0));
+}
+
 async function fetchOk(url, { as = "arrayBuffer" } = {}) {
-  const res = await fetch(url, {
-    headers: { "User-Agent": "shiritori-bot-web/0.1" },
-  });
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
   if (as === "json") return res.json();
   if (as === "text") return res.text();
   return res.arrayBuffer();
 }
 
-async function tryFetch(urls, options) {
-  let lastErr = null;
-  for (const url of urls) {
-    try {
-      const data = await fetchOk(url, options);
-      return { url, data };
-    } catch (e) {
-      lastErr = e;
-    }
-  }
-  throw lastErr || new Error("URLの取得に失敗しました");
-}
-
 async function fetchWithMeta(url) {
-  const res = await fetch(url, {
-    headers: { "User-Agent": "shiritori-bot-web/0.1" },
-  });
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
   const data = await res.arrayBuffer();
   return {
@@ -119,28 +108,6 @@ async function tryFetchWithMeta(urls) {
   throw lastErr || new Error("URLの取得に失敗しました");
 }
 
-function unzipFirst(arrayBuffer, { preferExt = null } = {}) {
-  const files = unzipSync(new Uint8Array(arrayBuffer));
-  const names = Object.keys(files).filter((n) => !n.endsWith("/"));
-  if (!names.length) throw new Error("zip が空です");
-  let chosen = names[0];
-  if (preferExt) {
-    const hit = names.find((n) => n.toLowerCase().endsWith(preferExt));
-    if (hit) chosen = hit;
-  }
-  return { name: chosen, bytes: files[chosen] };
-}
-
-function unzipToText(arrayBuffer, preferExt) {
-  const { name, bytes } = unzipFirst(arrayBuffer, { preferExt });
-  return { name, text: strFromU8(bytes) };
-}
-
-function unzipToJson(arrayBuffer) {
-  const { name, text } = unzipToText(arrayBuffer, ".json");
-  return { name, data: JSON.parse(text) };
-}
-
 function isZipBytes(bytes) {
   return (
     bytes.length > 3 &&
@@ -148,81 +115,6 @@ function isZipBytes(bytes) {
     bytes[1] === 0x4b &&
     (bytes[2] === 0x03 || bytes[2] === 0x05 || bytes[2] === 0x07)
   );
-}
-
-function decodeBytesToTextChunks(bytes, onText) {
-  const dec = new TextDecoder();
-  for (let pos = 0; pos < bytes.length; pos += STREAM_CHUNK_BYTES) {
-    const chunk = bytes.subarray(pos, Math.min(pos + STREAM_CHUNK_BYTES, bytes.length));
-    const text = dec.decode(chunk, { stream: true });
-    if (text) onText(text);
-  }
-  const tail = dec.decode();
-  if (tail) onText(tail);
-}
-
-function streamZipMemberText(arrayBuffer, preferExt, onText) {
-  return new Promise((resolve, reject) => {
-    let chosenName = null;
-    let finished = false;
-    let failure = null;
-    const dec = new TextDecoder();
-
-    const unzip = new Unzip((file) => {
-      if (file.name.endsWith("/")) return;
-      const matches =
-        !preferExt || file.name.toLowerCase().endsWith(preferExt);
-      if (matches && !chosenName) {
-        chosenName = file.name;
-        file.ondata = (err, data, final) => {
-          if (err) {
-            failure = failure || err;
-            return;
-          }
-          try {
-            const text = dec.decode(data, { stream: !final });
-            if (text) onText(text);
-            if (final) {
-              const tail = dec.decode();
-              if (tail) onText(tail);
-              finished = true;
-            }
-          } catch (e) {
-            failure = failure || e;
-          }
-        };
-      } else {
-        file.ondata = () => {};
-      }
-      file.start();
-    });
-    unzip.register(UnzipInflate);
-
-    const bytes = new Uint8Array(arrayBuffer);
-    let pos = 0;
-    const step = () => {
-      if (failure) return reject(failure);
-      if (pos >= bytes.length) {
-        if (!chosenName) {
-          return reject(new Error(`zip に ${preferExt || "ファイル"} がありません`));
-        }
-        if (!finished) {
-          return reject(new Error("zip メンバーの展開が完了しませんでした"));
-        }
-        return resolve(chosenName);
-      }
-      const end = Math.min(pos + STREAM_CHUNK_BYTES, bytes.length);
-      const final = end >= bytes.length;
-      try {
-        unzip.push(bytes.subarray(pos, end), final);
-      } catch (e) {
-        return reject(e);
-      }
-      pos = end;
-      setTimeout(step, 0);
-    };
-    step();
-  });
 }
 
 function createWordScanner(onWord) {
@@ -250,7 +142,7 @@ function createWordScanner(onWord) {
   let wordsClosed = false;
 
   function fail(msg) {
-    throw new Error(`JMdict JSONの解析に失敗しました: ${msg}`);
+    throw new Error(`JMdict の解析に失敗しました: ${msg}`);
   }
 
   function compact() {
@@ -475,7 +367,7 @@ function createLineScanner(onLine) {
       }
       if (start > 0) buf = buf.slice(start);
       if (buf.length > SCAN_WINDOW_LIMIT) {
-        throw new Error("CSV行バッファが異常に肥大化しました");
+        throw new Error("CSV 行バッファが異常に肥大化しました");
       }
     },
     flush() {
@@ -520,65 +412,6 @@ function wordPairsOf(word, source) {
   return out;
 }
 
-function* iterWordPairs(words, source) {
-  for (const word of words) {
-    yield* wordPairsOf(word, source);
-  }
-}
-
-function createJmBuilder() {
-  const bySurface = new Map();
-  const byReading = new Map();
-  let count = 0;
-
-  function add(surface, reading, source) {
-    const hit = { surface, reading, source };
-    if (!bySurface.has(surface)) {
-      bySurface.set(surface, hit);
-    } else if (
-      bySurface.get(surface).source === "jmnedict" &&
-      source === "jmdict"
-    ) {
-      bySurface.set(surface, hit);
-    }
-    if (!byReading.has(reading)) {
-      byReading.set(reading, hit);
-    } else if (
-      byReading.get(reading).source === "jmnedict" &&
-      source === "jmdict"
-    ) {
-      byReading.set(reading, hit);
-    }
-    count += 1;
-  }
-
-  return {
-    bySurface,
-    byReading,
-    add,
-    get count() {
-      return count;
-    },
-  };
-}
-
-/**
- * @returns {{ bySurface: Map<string, object>, byReading: Map<string, object>, count: number }}
- */
-
-export function buildJmdictMaps(jmdictWords, jmnedictWords = null) {
-  const builder = createJmBuilder();
-  for (const pair of iterWordPairs(jmdictWords, "jmdict")) {
-    builder.add(pair[0], pair[1], pair[2]);
-  }
-  if (jmnedictWords) {
-    for (const pair of iterWordPairs(jmnedictWords, "jmnedict")) {
-      builder.add(pair[0], pair[1], pair[2]);
-    }
-  }
-  return { bySurface: builder.bySurface, byReading: builder.byReading, count: builder.count };
-}
-
 function classifyPos(pos1, pos2, pos3) {
   if (pos1 === "名詞") {
     if (pos2 === "固有名詞") {
@@ -595,18 +428,709 @@ function classifyPos(pos1, pos2, pos3) {
   return null;
 }
 
-function createVocabState() {
-  
-  /** 
-   * @type {Map<string, Array<{surface:string, reading:string, category:string}>>}
-  */
-
-  const byFirstMora = new Map();
-  const seen = new Set();
-  return { byFirstMora, seen, total: 0, skipped: 0, lineNo: 0 };
+function parseCsvLine(line) {
+  const out = [];
+  let cur = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          cur += '"';
+          i += 1;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        cur += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ",") {
+      out.push(cur);
+      cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+  out.push(cur);
+  return out;
 }
 
-function processSudachiLine(line, st) {
+function createEagerJm() {
+  const bySurface = new Map();
+  const byReading = new Map();
+  let count = 0;
+
+  function add(surface, reading, srcCode) {
+    const prev = bySurface.get(surface);
+    if (!prev || (prev.src === 1 && srcCode === 0)) {
+      bySurface.set(surface, { surface, reading, src: srcCode });
+    }
+    const prevR = byReading.get(reading);
+    if (!prevR || (prevR.src === 1 && srcCode === 0)) {
+      byReading.set(reading, { surface, reading, src: srcCode });
+    }
+    count += 1;
+  }
+
+  return { bySurface, byReading, add, get count() { return count; } };
+}
+
+function createEagerVocab() {
+  const byFirstMora = new Map();
+  let count = 0;
+
+  function add(firstMora, reading, surface, catCode) {
+    let bucket = byFirstMora.get(firstMora);
+    if (!bucket) {
+      bucket = [];
+      byFirstMora.set(firstMora, bucket);
+    }
+    bucket.push([reading, surface, catCode]);
+    count += 1;
+  }
+
+  return { byFirstMora, add, get count() { return count; } };
+}
+
+function createShardWriter({ gen, log, enabled }) {
+  const jmPending = [];
+  const vocabPending = [];
+  for (let i = 0; i < NUM_SHARDS; i++) {
+    jmPending.push({ s: new Map(), r: new Map() });
+    vocabPending.push(new Map());
+  }
+  const eagerJm = createEagerJm();
+  const eagerVocab = createEagerVocab();
+  let pendingUnits = 0;
+  let addedUnits = 0;
+  let degraded = !enabled;
+  let flushRounds = 0;
+  const counts = { jmSurface: 0, jmReading: 0, vocab: 0 };
+
+  function spillPendingToEager() {
+    for (let si = 0; si < NUM_SHARDS; si++) {
+      const p = jmPending[si];
+      for (const [surface, pair] of p.s) {
+        eagerJm.add(surface, pair[0], pair[1]);
+      }
+      for (const [reading, pair] of p.r) {
+        eagerJm.add(pair[0], reading, pair[1]);
+      }
+      p.s.clear();
+      p.r.clear();
+      const v = vocabPending[si];
+      for (const [mora, rows] of v) {
+        for (const row of rows) eagerVocab.add(mora, row[0], row[1], row[2]);
+      }
+      v.clear();
+    }
+    pendingUnits = 0;
+  }
+
+  function addJm(surface, reading, srcCode) {
+    if (degraded) {
+      eagerJm.add(surface, reading, srcCode);
+      addedUnits += 1;
+      return;
+    }
+    const p = jmPending[shardFor(surface)];
+    if (!p.s.has(surface)) {
+      p.s.set(surface, [reading, srcCode]);
+      pendingUnits += 1;
+      addedUnits += 1;
+    }
+    const q = jmPending[shardFor(reading)];
+    if (!q.r.has(reading)) {
+      q.r.set(reading, [surface, srcCode]);
+      pendingUnits += 1;
+      addedUnits += 1;
+    }
+  }
+
+  function addVocabRow(firstMora, reading, surface, catCode) {
+    if (degraded) {
+      eagerVocab.add(firstMora, reading, surface, catCode);
+      addedUnits += 1;
+      return;
+    }
+    const p = vocabPending[shardFor(firstMora)];
+    let bucket = p.get(firstMora);
+    if (!bucket) {
+      bucket = [];
+      p.set(firstMora, bucket);
+    }
+    bucket.push([reading, surface, catCode]);
+    pendingUnits += 1;
+    addedUnits += 1;
+  }
+
+  async function flushJmShard(si) {
+    const p = jmPending[si];
+    if (!p.s.size && !p.r.size) return;
+    const key = `${CACHE_PREFIX}:jm:s${si}`;
+    let sMap = new Map();
+    let rMap = new Map();
+    const existing = await cacheGet(key);
+    if (existing) {
+      try {
+        const payload = JSON.parse(strFromU8(unzlibSync(existing)));
+        if (payload.gen === gen) {
+          if (Array.isArray(payload.s)) sMap = new Map(payload.s);
+          if (Array.isArray(payload.r)) rMap = new Map(payload.r);
+        }
+      } catch (e) {
+        sendWebhook(`dict-loader jm shard s${si} 再読に失敗: ${e && e.message}`, "warn");
+      }
+    }
+    let insertedS = 0;
+    let insertedR = 0;
+    for (const [k, v] of p.s) {
+      if (!sMap.has(k)) {
+        sMap.set(k, v);
+        insertedS += 1;
+      }
+    }
+    for (const [k, v] of p.r) {
+      if (!rMap.has(k)) {
+        rMap.set(k, v);
+        insertedR += 1;
+      }
+    }
+    const payload = {
+      gen,
+      s: Array.from(sMap),
+      r: Array.from(rMap),
+    };
+    await cacheSet(key, zlibSync(strToU8(JSON.stringify(payload)), { level: ZLIB_LEVEL }));
+    counts.jmSurface += insertedS;
+    counts.jmReading += insertedR;
+    p.s.clear();
+    p.r.clear();
+  }
+
+  async function flushVocabShard(si) {
+    const p = vocabPending[si];
+    if (!p.size) return;
+    const key = `${CACHE_PREFIX}:vocab:s${si}`;
+    let moraMap = new Map();
+    const existing = await cacheGet(key);
+    if (existing) {
+      try {
+        const payload = JSON.parse(strFromU8(unzlibSync(existing)));
+        if (payload.gen === gen && Array.isArray(payload.mora)) {
+          moraMap = new Map(payload.mora);
+        }
+      } catch (e) {
+        sendWebhook(`シャード s${si} 再読み込みに失敗: ${e && e.message}`, "warn");
+      }
+    }
+    let inserted = 0;
+    for (const [mora, rows] of p) {
+      const prev = moraMap.get(mora);
+      if (prev) {
+        for (const row of rows) prev.push(row);
+      } else {
+        moraMap.set(mora, rows);
+      }
+      inserted += rows.length;
+    }
+    const payload = { gen, mora: Array.from(moraMap) };
+    await cacheSet(key, zlibSync(strToU8(JSON.stringify(payload)), { level: ZLIB_LEVEL }));
+    counts.vocab += inserted;
+    p.clear();
+  }
+
+  async function flushAll() {
+    if (degraded) return;
+    pendingUnits = 0;
+    flushRounds += 1;
+    log(`  シャード書き込み #${flushRounds}…`);
+    for (let si = 0; si < NUM_SHARDS; si++) {
+      try {
+        await flushJmShard(si);
+        await flushVocabShard(si);
+      } catch (e) {
+        degraded = true;
+        spillPendingToEager();
+        sendWebhook(
+          `シャード書き込み失敗 (s${si}): ${e && e.name}: ${e && e.message}。RAMモードで継続`,
+          "warn"
+        );
+        return;
+      }
+      await yieldToEvents();
+    }
+  }
+
+  async function flushIfHeavy() {
+    if (degraded || addedUnits < FLUSH_THRESHOLD) return;
+    await flushAll();
+  }
+
+  async function finalize({ hashes, sourceNames, sourceTag, sourceMeta }) {
+    await flushAll();
+    if (degraded) {
+      return { degraded: true, eagerJm, eagerVocab };
+    }
+    await cacheSet(`${CACHE_PREFIX}:meta`, {
+      version: 3,
+      gen,
+      savedAt: Date.now(),
+      hashes,
+      sources: sourceNames,
+      sourceTag,
+      sourceMeta,
+      counts,
+    });
+    for (const legacy of LEGACY_PREFIXES) {
+      await cacheDeleteByPrefix(legacy);
+    }
+    log(
+      `  キャッシュ保存完了 (索引 ${counts.jmSurface.toLocaleString()}+${counts.jmReading.toLocaleString()} 件 / 語彙 ${counts.vocab.toLocaleString()} 件)`
+    );
+    return { degraded: false, eagerJm: null, eagerVocab: null };
+  }
+
+  return {
+    addJm,
+    addVocabRow,
+    flushIfHeavy,
+    finalize,
+    get counts() {
+      return counts;
+    },
+    getEagerFallback() {
+      return { eagerJm, eagerVocab };
+    },
+  };}
+
+function createJmIdbLoader({ gen }) {
+  const lru = new Map();
+
+  async function getShard(si) {
+    let shard = lru.get(si);
+    if (shard) {
+      lru.delete(si);
+      lru.set(si, shard);
+      return shard;
+    }
+    const raw = await cacheGet(`${CACHE_PREFIX}:jm:s${si}`);
+    shard = { s: new Map(), r: new Map() };
+    if (raw) {
+      let payload = null;
+      try {
+        payload = JSON.parse(strFromU8(unzlibSync(raw)));
+      } catch (e) {
+        sendWebhook(`シャード s${si} の解凍に失敗: ${e && e.message}`, "warn");
+      }
+      if (payload && payload.gen === gen) {
+        if (Array.isArray(payload.s)) shard.s = new Map(payload.s);
+        if (Array.isArray(payload.r)) shard.r = new Map(payload.r);
+      } else if (payload) {
+        sendWebhook(`シャード s${si} の不一致 (raw=${payload.gen} gen=${gen})`, "warn");
+      }
+    }
+    lru.set(si, shard);
+    if (lru.size > JM_SHARD_LRU) {
+      lru.delete(lru.keys().next().value);
+    }
+    return shard;
+  }
+
+  return {
+    async lookupSurface(surface) {
+      const shard = await getShard(shardFor(surface));
+      const v = shard.s.get(surface);
+      if (!v) return null;
+      return { surface, reading: v[0], source: CODE_TO_SOURCE[v[1] ?? 0] };
+    },
+    async lookupReading(reading) {
+      const shard = await getShard(shardFor(reading));
+      const v = shard.r.get(reading);
+      if (!v) return null;
+      return { surface: v[0], reading, source: CODE_TO_SOURCE[v[1] ?? 0] };
+    },
+  };
+}
+
+function createEagerJmLoader(eagerJm) {
+  return {
+    async lookupSurface(surface) {
+      const hit = eagerJm.bySurface.get(surface);
+      if (!hit) return null;
+      return { surface, reading: hit.reading, source: CODE_TO_SOURCE[hit.src ?? 0] };
+    },
+    async lookupReading(reading) {
+      const hit = eagerJm.byReading.get(reading);
+      if (!hit) return null;
+      return { surface: hit.surface, reading, source: CODE_TO_SOURCE[hit.src ?? 0] };
+    },
+  };
+}
+
+function createCompositeJmLoader(primary, secondary) {
+  return {
+    async lookupSurface(surface) {
+      return (
+        (await primary.lookupSurface(surface)) ||
+        (await secondary.lookupSurface(surface))
+      );
+    },
+    async lookupReading(reading) {
+      return (
+        (await primary.lookupReading(reading)) ||
+        (await secondary.lookupReading(reading))
+      );
+    },
+  };
+}
+
+function createVocabIdbLoader({ gen }) {
+  const lru = new Map();
+
+  async function getShard(si) {
+    let shard = lru.get(si);
+    if (shard) {
+      lru.delete(si);
+      lru.set(si, shard);
+      return shard;
+    }
+    const raw = await cacheGet(`${CACHE_PREFIX}:vocab:s${si}`);
+    shard = { mora: new Map() };
+    if (raw) {
+      let payload = null;
+      try {
+        payload = JSON.parse(strFromU8(unzlibSync(raw)));
+      } catch (e) {
+        sendWebhook(`シャード s${si} の解凍に失敗: ${e && e.message}`, "warn");
+      }
+      if (payload && payload.gen === gen && Array.isArray(payload.mora)) {
+        shard.mora = new Map(payload.mora);
+      } else if (payload) {
+        sendWebhook(`シャード s${si} の不一致 (raw=${payload.gen} gen=${gen})`, "warn");
+      }
+    }
+    lru.set(si, shard);
+    if (lru.size > VOCAB_SHARD_LRU) {
+      lru.delete(lru.keys().next().value);
+    }
+    return shard;
+  }
+
+  return {
+    async loadMora(mora) {
+      const shard = await getShard(shardFor(mora));
+      const rows = shard.mora.get(mora) || [];
+      return rows.map(([reading, surface, catCode]) => ({
+        surface,
+        reading,
+        category: CODE_TO_CATEGORY[catCode] ?? "other",
+      }));
+    },
+  };
+}
+
+function eagerVocabToPoolMap(eagerVocab) {
+  const byFirstMora = new Map();
+  for (const [mora, rows] of eagerVocab.byFirstMora) {
+    byFirstMora.set(
+      mora,
+      rows.map(([reading, surface, catCode]) => ({
+        surface,
+        reading,
+        category: CODE_TO_CATEGORY[catCode] ?? "other",
+      }))
+    );
+  }
+  return byFirstMora;
+}
+
+async function resolveJmdictAssetUrls(log) {
+  log("JMdict / JMnedictの最新バージョンを確認中…");
+  const release = await fetchOk(DICT_SOURCES.jmdictApi, { as: "json" });
+  const assets = {};
+  for (const a of release.assets || []) {
+    assets[a.name] = a.browser_download_url;
+  }
+
+  function pick(key, pattern) {
+    const candidates = Object.entries(assets).filter(
+      ([name]) =>
+        pattern.test(name) &&
+        !name.includes("common") &&
+        !name.includes("examples")
+    );
+    if (!candidates.length) {
+      throw new Error(`リリースに ${key} の zipファイルが見つかりません`);
+    }
+    candidates.sort((a, b) => (a[0] < b[0] ? -1 : 1));
+    const [name, url] = candidates[candidates.length - 1];
+    log(`  ${key}: ${name}`);
+    return url;
+  }
+
+  return {
+    jmdict: pick("jmdict", /^jmdict-eng-\d.+\.json\.zip$/),
+    jmnedict: pick("jmnedict", /^jmnedict-all-\d.+\.json\.zip$/),
+    tag: release.tag_name || release.name || "unknown",
+  };
+}
+
+async function acquireJmSource(log, kind, state) {
+  const local = DICT_SOURCES.local;
+  const zipUrl = kind === "jmdict" ? local.jmdictZip : local.jmnedictZip;
+  const jsonUrl = kind === "jmdict" ? local.jmdictJson : local.jmnedictJson;
+
+  log(`${kind === "jmdict" ? "JMdict" : "JMnedict"}からファイルを取得中…`);
+  try {
+    const hit = await tryFetchWithMeta([zipUrl]);
+    log(`  取得元: ${hit.url}`);
+    return { data: hit.data, meta: { url: hit.url, etag: hit.etag, lastModified: hit.lastModified } };
+  } catch (e1) {
+    try {
+      const hit = await tryFetchWithMeta([jsonUrl]);
+      log(`  取得元: ${hit.url}`);
+      return { data: hit.data, meta: { url: hit.url, etag: hit.etag, lastModified: hit.lastModified } };
+    } catch (e2) {
+      if (kind === "jmnedict") {
+        log(`  JMnedict からのファイルの取得をスキップ: ${e2.message}`);
+        return null;
+      }
+      if (!state.urls) {
+        state.urls = await resolveJmdictAssetUrls(log);
+        state.tag = state.urls.tag;
+      }
+      try {
+        const hit = await fetchWithMeta(state.urls.jmdict);
+        return { data: hit.data, meta: { url: hit.url, etag: hit.etag, lastModified: hit.lastModified } };
+      } catch (e3) {
+        throw new Error(`JMdict からのファイルの取得に失敗しました: ${e3.message}\n`);
+      }
+    }
+  }
+}
+
+async function loadSudachiSource(log) {
+  const local = DICT_SOURCES.local;
+  const remoteZip = `${DICT_SOURCES.sudachiBase}/${DICT_SOURCES.sudachiRelease}/${DICT_SOURCES.sudachiFile}`;
+
+  log("SudachiDict からファイルを取得中…");
+  const hit = await tryFetchWithMeta([local.sudachiZip, remoteZip, local.sudachiCsv]);
+  log(`  取得元: ${hit.url}`);
+  return {
+    url: hit.url,
+    data: hit.data,
+    meta: { url: hit.url, etag: hit.etag, lastModified: hit.lastModified },
+  };
+}
+
+async function computeSha256Hex(buffer) {
+  const digest = await crypto.subtle.digest("SHA-256", buffer);
+  return Array.from(new Uint8Array(digest), (b) =>
+    b.toString(16).padStart(2, "0")
+  ).join("");
+}
+
+async function checkFreshnessViaHead(log) {
+  const meta = await cacheGet(`${CACHE_PREFIX}:meta`);
+  if (!meta || !meta.sourceMeta || !meta.gen) return null;
+
+  for (const [name, info] of Object.entries(meta.sourceMeta)) {
+    if (!info || !info.url) return null;
+    try {
+      const res = await fetch(info.url, { method: "HEAD" });
+      if (!res.ok) return null;
+      const etag = res.headers.get("etag");
+      const lastModified = res.headers.get("last-modified");
+      if (!etag && !lastModified) return null;
+      if (etag && info.etag && etag !== info.etag) {
+        log(`  ${name}: eTag の変更を検知したため再取得します`);
+        return null;
+      }
+      if (!etag && lastModified && info.lastModified && lastModified !== info.lastModified) {
+        log(`  ${name}: LastModified の変更を検知したため再取得します`);
+        return null;
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  const allKeys = new Set(await cacheKeys());
+  for (let i = 0; i < NUM_SHARDS; i++) {
+    if (!allKeys.has(`${CACHE_PREFIX}:jm:s${i}`)) return null;
+    if (!allKeys.has(`${CACHE_PREFIX}:vocab:s${i}`)) return null;
+  }
+
+  return meta;
+}
+
+async function tryLoadFromCache(log, { includeJmnedict }) {
+  markStage("cache:head-check");
+  const meta = await checkFreshnessViaHead(log);
+  if (!meta) return null;
+
+  const need = includeJmnedict
+    ? ["jmdict", "jmnedict", "sudachi"]
+    : ["jmdict", "sudachi"];
+  if (!need.every((s) => (meta.sources || []).includes(s))) {
+    log("  キャッシュのソース構成が異なるため再構築します");
+    return null;
+  }
+
+  log("キャッシュ済みの語彙で開始します (遅延読み込み)");
+  return {
+    jmdict: new JmdictIndex(createJmIdbLoader({ gen: meta.gen })),
+    pool: new VocabPool(new Map(), {
+      loadMora: createVocabIdbLoader({ gen: meta.gen }).loadMora,
+    }),
+    fromCache: true,
+    sourceTag: meta.sourceTag || "cache",
+  };
+}
+
+async function streamZipMemberText(arrayBuffer, preferExt, onText, onChunk) {
+  let chosenName = null;
+  let finished = false;
+  let failure = null;
+  const dec = new TextDecoder();
+
+  const unzip = new Unzip((file) => {
+    if (file.name.endsWith("/")) return;
+    const matches = !preferExt || file.name.toLowerCase().endsWith(preferExt);
+    if (matches && !chosenName) {
+      chosenName = file.name;
+      file.ondata = (err, data, final) => {
+        if (err) {
+          failure = failure || err;
+          return;
+        }
+        try {
+          const text = dec.decode(data, { stream: !final });
+          if (text) onText(text);
+          if (final) {
+            const tail = dec.decode();
+            if (tail) onText(tail);
+            finished = true;
+          }
+        } catch (e) {
+          failure = failure || e;
+        }
+      };
+    } else {
+      file.ondata = () => {};
+    }
+    file.start();
+  });
+  unzip.register(UnzipInflate);
+
+  const bytes = new Uint8Array(arrayBuffer);
+  for (let pos = 0; pos < bytes.length; ) {
+    if (failure) throw failure;
+    const end = Math.min(pos + STREAM_CHUNK_BYTES, bytes.length);
+    const final = end >= bytes.length;
+    unzip.push(bytes.subarray(pos, end), final);
+    pos = end;
+    if (failure) throw failure;
+    if (onChunk) await onChunk();
+    await yieldToEvents();
+  }
+  if (failure) throw failure;
+  if (!chosenName) {
+    throw new Error(`zip に ${preferExt || "ファイル"} がありません`);
+  }
+  if (!finished) {
+    throw new Error("zip メンバーの展開が完了しませんでした");
+  }
+  return chosenName;
+}
+
+async function decodeBytesToTextChunks(bytes, onText, onChunk) {
+  const dec = new TextDecoder();
+  for (let pos = 0; pos < bytes.length; pos += STREAM_CHUNK_BYTES) {
+    const chunk = bytes.subarray(pos, Math.min(pos + STREAM_CHUNK_BYTES, bytes.length));
+    const text = dec.decode(chunk, { stream: true });
+    if (text) onText(text);
+    if (onChunk) await onChunk();
+    await yieldToEvents();
+  }
+  const tail = dec.decode();
+  if (tail) onText(tail);
+}
+
+async function streamJmdictWordsInto(arrayBuffer, source, writer, log, label) {
+  let seen = 0;
+  const onWord = (word) => {
+    const srcCode = SOURCE_TO_CODE[source];
+    for (const pair of wordPairsOf(word, source)) {
+      writer.addJm(pair[0], pair[1], srcCode);
+    }
+    seen += 1;
+    if (seen % 200000 === 0) {
+      log(`  ${label} ${seen.toLocaleString()} 語…`);
+    }
+  };
+
+  const scanner = createWordScanner(onWord);
+  const bytes = new Uint8Array(arrayBuffer);
+  const onChunk = () => writer.flushIfHeavy();
+
+  try {
+    if (isZipBytes(bytes)) {
+      await streamZipMemberText(arrayBuffer, ".json", (t) => scanner.push(t), onChunk);
+      scanner.end();
+      return;
+    }
+    await decodeBytesToTextChunks(bytes, (t) => scanner.push(t), onChunk);
+    scanner.end();
+  } catch (e) {
+    sendWebhook(
+      `dict-loader streamJmdictWordsInto(${label}) 失敗: ${e && e.name}: ${e && e.message}`,
+      "error"
+    );
+    throw e;
+  }
+}
+
+async function parseSudachiInto(sudachiData, url, writer, log) {
+  const st = { seen: new Set(), total: 0, skipped: 0, lineNo: 0 };
+  const onLine = (line) => {
+    processSudachiLine(line, st, writer);
+    if (st.lineNo % 200000 === 0) {
+      log(`  SudachiDict ${st.lineNo.toLocaleString()} 行…`);
+    }
+  };
+  const lines = createLineScanner(onLine);
+  const bytes = new Uint8Array(sudachiData);
+  const onChunk = () => writer.flushIfHeavy();
+
+  log("SudachiDict を解析中…");
+  const isCsvUrl =
+    url.endsWith(".csv") || url.includes("small_lex.csv");
+
+  try {
+    if (isZipBytes(bytes) && !isCsvUrl) {
+      await streamZipMemberText(sudachiData, ".csv", (t) => lines.push(t), onChunk);
+      lines.flush();
+    } else {
+      await decodeBytesToTextChunks(bytes, (t) => lines.push(t), onChunk);
+      lines.flush();
+    }
+  } catch (e) {
+    sendWebhook(
+      `dict-loader parseSudachiInto 失敗: ${e && e.name}: ${e && e.message}`,
+      "error"
+    );
+    throw e;
+  }
+
+  log(`  → 語彙 ${st.total.toLocaleString()} 語 (スキップ ${st.skipped.toLocaleString()})`);
+}
+
+function processSudachiLine(line, st, writer) {
   st.lineNo += 1;
   if (!line) return;
   const row = parseCsvLine(line);
@@ -673,506 +1197,8 @@ function processSudachiLine(line, st) {
   st.seen.add(reading);
 
   const first = effectiveFirstMora(reading) || reading[0];
-  let bucket = st.byFirstMora.get(first);
-  if (!bucket) {
-    bucket = [];
-    st.byFirstMora.set(first, bucket);
-  }
-  bucket.push({ surface, reading, category });
+  writer.addVocabRow(first, reading, surface, CATEGORY_TO_CODE[category] ?? 6);
   st.total += 1;
-}
-
-export function buildVocabFromSudachiCsv(csvText, log = () => {}) {
-  const st = createVocabState();
-  log("SudachiDictを解析中…");
-  let start = 0;
-  for (;;) {
-    let nl = csvText.indexOf("\n", start);
-    let last = false;
-    if (nl === -1) {
-      nl = csvText.length;
-      last = true;
-    }
-    let line = csvText.slice(start, nl);
-    if (line.endsWith("\r")) line = line.slice(0, -1);
-    processSudachiLine(line, st);
-    if (st.lineNo % 200000 === 0) {
-      log(`  SudachiDict ${st.lineNo.toLocaleString()} 行…`);
-    }
-    if (last) break;
-    start = nl + 1;
-  }
-  log(`  → 語彙 ${st.total.toLocaleString()} 語 (スキップ ${st.skipped.toLocaleString()})`);
-  return { byFirstMora: st.byFirstMora, total: st.total };
-}
-
-function parseCsvLine(line) {
-  const out = [];
-  let cur = "";
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (inQuotes) {
-      if (ch === '"') {
-        if (line[i + 1] === '"') {
-          cur += '"';
-          i += 1;
-        } else {
-          inQuotes = false;
-        }
-      } else {
-        cur += ch;
-      }
-    } else if (ch === '"') {
-      inQuotes = true;
-    } else if (ch === ",") {
-      out.push(cur);
-      cur = "";
-    } else {
-      cur += ch;
-    }
-  }
-  out.push(cur);
-  return out;
-}
-
-async function resolveJmdictAssetUrls(log) {
-  log("JMdict / JMnedictの最新バージョンを確認中…");
-  const release = await fetchOk(DICT_SOURCES.jmdictApi, { as: "json" });
-  const assets = {};
-  for (const a of release.assets || []) {
-    assets[a.name] = a.browser_download_url;
-  }
-
-  function pick(key, pattern) {
-    const candidates = Object.entries(assets).filter(
-      ([name]) =>
-        pattern.test(name) &&
-        !name.includes("common") &&
-        !name.includes("examples")
-    );
-    if (!candidates.length) {
-      throw new Error(`リリースに ${key} の zipファイルが見つかりません`);
-    }
-    candidates.sort((a, b) => (a[0] < b[0] ? -1 : 1));
-    const [name, url] = candidates[candidates.length - 1];
-    log(`  ${key}: ${name}`);
-    return url;
-  }
-
-  return {
-    jmdict: pick("jmdict", /^jmdict-eng-\d.+\.json\.zip$/),
-    jmnedict: pick("jmnedict", /^jmnedict-all-\d.+\.json\.zip$/),
-    tag: release.tag_name || release.name || "unknown",
-  };
-}
-
-async function loadJmdictBuffers(log, { includeJmnedict = true } = {}) {
-  const local = DICT_SOURCES.local;
-  const out = {
-    jmdict: null,
-    jmnedict: null,
-    sourceTag: "local",
-    sourceMeta: {},
-  };
-
-  log("JMdictからファイルを取得中…");
-  try {
-    const hit = await tryFetchWithMeta([local.jmdictZip]);
-    log(`  取得元: ${hit.url}`);
-    out.jmdict = hit.data;
-    out.sourceMeta.jmdict = { url: hit.url, etag: hit.etag, lastModified: hit.lastModified };
-  } catch {
-    try {
-      const hit = await tryFetchWithMeta([local.jmdictJson]);
-      log(`  取得元: ${hit.url}`);
-      out.jmdict = hit.data;
-      out.sourceMeta.jmdict = { url: hit.url, etag: hit.etag, lastModified: hit.lastModified };
-    } catch {
-      const urls = await resolveJmdictAssetUrls(log);
-      out.sourceTag = urls.tag;
-      log("JMdictからファイルを取得中…");
-      try {
-        const hit = await fetchWithMeta(urls.jmdict);
-        out.jmdict = hit.data;
-        out.sourceMeta.jmdict = { url: hit.url, etag: hit.etag, lastModified: hit.lastModified };
-      } catch (e) {
-        throw new Error(
-          `JMdictからのファイルの取得に失敗しました: ${e.message}\n`
-        );
-      }
-    }
-  }
-
-  if (includeJmnedict) {
-    log("JMnedictからファイルを取得中…");
-    try {
-      const hit = await tryFetchWithMeta([local.jmnedictZip]);
-      log(`  取得元: ${hit.url}`);
-      out.jmnedict = hit.data;
-      out.sourceMeta.jmnedict = { url: hit.url, etag: hit.etag, lastModified: hit.lastModified };
-    } catch {
-      try {
-        const hit = await tryFetchWithMeta([local.jmnedictJson]);
-        log(`  取得元: ${hit.url}`);
-        out.jmnedict = hit.data;
-        out.sourceMeta.jmnedict = { url: hit.url, etag: hit.etag, lastModified: hit.lastModified };
-      } catch (e) {
-        log(`  JMnedictからのファイルの取得をスキップ: ${e.message}`);
-      }
-    }
-  }
-
-  return out;
-}
-
-async function loadSudachiBuffer(log) {
-  const local = DICT_SOURCES.local;
-  const remoteZip = `${DICT_SOURCES.sudachiBase}/${DICT_SOURCES.sudachiRelease}/${DICT_SOURCES.sudachiFile}`;
-
-  log("SudachiDictからファイルを取得中…");
-  const hit = await tryFetchWithMeta([local.sudachiZip, remoteZip, local.sudachiCsv]);
-  log(`  取得元: ${hit.url}`);
-  return {
-    url: hit.url,
-    data: hit.data,
-    sourceMeta: { url: hit.url, etag: hit.etag, lastModified: hit.lastModified },
-  };
-}
-
-async function streamJmdictWordsInto(arrayBuffer, source, builder, log, label) {
-  let seen = 0;
-  const onWord = (word) => {
-    for (const pair of wordPairsOf(word, source)) {
-      builder.add(pair[0], pair[1], pair[2]);
-    }
-    seen += 1;
-    if (seen % 200000 === 0) {
-      log(`  ${label} ${seen.toLocaleString()} 語…`);
-    }
-  };
-
-  const bytes = new Uint8Array(arrayBuffer);
-
-  if (isZipBytes(bytes)) {
-    try {
-      const scanner = createWordScanner(onWord);
-      await streamZipMemberText(arrayBuffer, ".json", (t) => scanner.push(t));
-      scanner.end();
-      return;
-    } catch (e) {
-      log(`  ${label}: ストリーム解析に失敗 (${e.message}) → 一括解析に切り替えます`);
-      sendWebhook(`dict-loader streamJmdictWordsInto(${label}) ストリーム失敗: ${e.name}: ${e.message}`, "warn");
-    }
-    const { data } = unzipToJson(arrayBuffer);
-    for (const word of data.words || []) onWord(word);
-    return;
-  }
-
-  try {
-    const scanner = createWordScanner(onWord);
-    decodeBytesToTextChunks(bytes, (t) => scanner.push(t));
-    scanner.end();
-  } catch (e) {
-    log(`  ${label}: ストリーム解析に失敗 (${e.message}) → 一括解析に切り替えます`);
-    sendWebhook(`dict-loader streamJmdictWordsInto(${label}) raw失敗: ${e.name}: ${e.message}`, "warn");
-    const data = JSON.parse(strFromU8(bytes));
-    for (const word of data.words || []) onWord(word);
-  }
-}
-
-async function parseJmdictSources(sources, log) {
-  const builder = createJmBuilder();
-
-  log("JMdictインデックスを構築中…");
-  if (sources.jmdict) {
-    await streamJmdictWordsInto(sources.jmdict, "jmdict", builder, log, "JMdict");
-  }
-  if (sources.jmnedict) {
-    await streamJmdictWordsInto(sources.jmnedict, "jmnedict", builder, log, "JMnedict");
-  }
-  log(`  エントリ ${builder.count.toLocaleString()} 件`);
-  return {
-    bySurface: builder.bySurface,
-    byReading: builder.byReading,
-    count: builder.count,
-  };
-}
-
-async function parseSudachiSource(sudachi, log) {
-  const st = createVocabState();
-  const onLine = (line) => {
-    processSudachiLine(line, st);
-    if (st.lineNo % 200000 === 0) {
-      log(`  SudachiDict ${st.lineNo.toLocaleString()} 行…`);
-    }
-  };
-  const lines = createLineScanner(onLine);
-  const bytes = new Uint8Array(sudachi.data);
-
-  const finish = () => {
-    log(`  → 語彙 ${st.total.toLocaleString()} 語 (スキップ ${st.skipped.toLocaleString()})`);
-    return { byFirstMora: st.byFirstMora, total: st.total };
-  };
-
-  log("SudachiDictを解析中…");
-
-  const isCsvUrl =
-    sudachi.url.endsWith(".csv") || sudachi.url.includes("small_lex.csv");
-
-  if (isZipBytes(bytes) && !isCsvUrl) {
-    try {
-      await streamZipMemberText(sudachi.data, ".csv", (t) => lines.push(t));
-      lines.flush();
-      return finish();
-    } catch (e) {
-      log(`  SudachiDict: ストリーム解析に失敗 (${e.message}) → 一括解析に切り替えます`);
-      sendWebhook(`dict-loader parseSudachiSource ストリーム失敗: ${e.name}: ${e.message}`, "warn");
-    }
-    const { text } = unzipToText(sudachi.data, ".csv");
-    for (const line of text.split(/\r?\n/)) onLine(line);
-    return finish();
-  }
-
-  try {
-    decodeBytesToTextChunks(bytes, (t) => lines.push(t));
-    lines.flush();
-  } catch (e) {
-    log(`  SudachiDict: ストリーム解析に失敗 (${e.message}) → 一括解析に切り替えます`);
-    sendWebhook(`dict-loader parseSudachiSource raw失敗: ${e.name}: ${e.message}`, "warn");
-    const text = strFromU8(bytes);
-    for (const line of text.split(/\r?\n/)) onLine(line);
-  }
-  return finish();
-}
-
-async function computeSha256Hex(buffer) {
-  const digest = await crypto.subtle.digest("SHA-256", buffer);
-  return Array.from(new Uint8Array(digest), (b) =>
-    b.toString(16).padStart(2, "0")
-  ).join("");
-}
-
-async function checkFreshnessViaHead(log) {
-  const meta = await cacheGet(`${CACHE_PREFIX}:meta`);
-  if (!meta || !meta.sourceMeta) return null;
-
-  for (const [name, info] of Object.entries(meta.sourceMeta)) {
-    if (!info.url) return null;
-    try {
-      const res = await fetch(info.url, { method: "HEAD" });
-      if (!res.ok) return null;
-      const etag = res.headers.get("etag");
-      const lastModified = res.headers.get("last-modified");
-      if (!etag && !lastModified) return null;
-      if (etag && info.etag && etag !== info.etag) {
-        log(`  ${name}: eTagの変更を検知したため再取得します`);
-        return null;
-      }
-      if (!etag && lastModified && info.lastModified && lastModified !== info.lastModified) {
-        log(`  ${name}: LastModifiedの変更を検知したため再取得します`);
-        return null;
-      }
-    } catch {
-      return null;
-    }
-  }
-
-  const allKeys = new Set(await cacheKeys());
-  for (let i = 0; i < NUM_SHARDS; i++) {
-    if (!allKeys.has(`${CACHE_PREFIX}:jmdict:s${i}`)) return null;
-    if (!allKeys.has(`${CACHE_PREFIX}:vocab:s${i}`)) return null;
-  }
-
-  return meta;
-}
-
-async function findValidCache(hashes, sourceNames, log) {
-  const meta = await cacheGet(`${CACHE_PREFIX}:meta`);
-  if (!meta || !meta.hashes) return null;
-
-  for (const name of sourceNames) {
-    if (!meta.hashes[name] || meta.hashes[name] !== hashes[name]) {
-      log(`  ${name} が最新版ではありません。キャッシュを再構築します`);
-      return null;
-    }
-  }
-
-  const cachedSources = meta.sources || [];
-  if (
-    cachedSources.length !== sourceNames.length ||
-    !sourceNames.every((s) => cachedSources.includes(s))
-  ) {
-    log("ソース構成の変更を検出しました。キャッシュを再構築します");
-    return null;
-  }
-
-  const allKeys = new Set(await cacheKeys());
-  for (let i = 0; i < NUM_SHARDS; i++) {
-    if (!allKeys.has(`${CACHE_PREFIX}:jmdict:s${i}`)) {
-      log(`JMdictシャード s${i} が欠損しています。キャッシュを再構築します`);
-      return null;
-    }
-    if (!allKeys.has(`${CACHE_PREFIX}:vocab:s${i}`)) {
-      log(`語彙シャード s${i} が欠損しています。キャッシュを再構築します`);
-      return null;
-    }
-  }
-
-  return { meta };
-}
-
-async function loadFromCache(log) {
-  log("キャッシュからJMdictを復元中…");
-
-  const bySurface = new Map();
-  const byReading = new Map();
-  for (let i = 0; i < NUM_SHARDS; i++) {
-    const raw = await cacheGet(`${CACHE_PREFIX}:jmdict:s${i}`);
-    if (!raw) continue;
-    const groups = JSON.parse(strFromU8(unzlibSync(raw)));
-    for (const mora of Object.keys(groups)) {
-      const { s: sEntries, r: rEntries } = groups[mora];
-      for (const [key, reading, srcCode] of sEntries) {
-        bySurface.set(key, {
-          surface: key,
-          reading,
-          source: CODE_TO_SOURCE[srcCode],
-        });
-      }
-      for (const [key, surface, reading, srcCode] of rEntries) {
-        byReading.set(key, {
-          surface,
-          reading,
-          source: CODE_TO_SOURCE[srcCode],
-        });
-      }
-    }
-    await new Promise((r) => setTimeout(r, 0));
-  }
-  log(
-    `  JMdict: ${(bySurface.size + byReading.size).toLocaleString()} 件復元`
-  );
-
-  const shardCache = new Map();
-  async function loadMora(mora) {
-    const si = shardFor(mora);
-    if (!shardCache.has(si)) {
-      const raw = await cacheGet(`${CACHE_PREFIX}:vocab:s${si}`);
-      if (!raw) {
-        shardCache.set(si, {});
-      } else {
-        const groups = JSON.parse(strFromU8(unzlibSync(raw)));
-        const parsed = {};
-        for (const m of Object.keys(groups)) {
-          parsed[m] = groups[m].map(([reading, surface, catCode]) => ({
-            surface,
-            reading,
-            category: CODE_TO_CATEGORY[catCode],
-          }));
-        }
-        shardCache.set(si, parsed);
-      }
-    }
-    return shardCache.get(si)[mora] || [];
-  }
-
-  const pool = new VocabPool(new Map(), { loadMora });
-  log("  語彙プール: 遅延読み込みモード");
-
-  return { bySurface, byReading, pool };
-}
-
-function buildJmShard(jm, si) {
-  const shard = {};
-  for (const [key, hit] of jm.bySurface) {
-    const mora = effectiveFirstMora(hit.reading) || hit.reading[0] || "_";
-    if (shardFor(mora) !== si) continue;
-    if (!shard[mora]) shard[mora] = { s: [], r: [] };
-    shard[mora].s.push([
-      key,
-      hit.reading,
-      SOURCE_TO_CODE[hit.source] ?? 0,
-    ]);
-  }
-  for (const [key, hit] of jm.byReading) {
-    const mora = effectiveFirstMora(key) || key[0] || "_";
-    if (shardFor(mora) !== si) continue;
-    if (!shard[mora]) shard[mora] = { s: [], r: [] };
-    shard[mora].r.push([
-      key,
-      hit.surface,
-      hit.reading,
-      SOURCE_TO_CODE[hit.source] ?? 0,
-    ]);
-  }
-  return shard;
-}
-
-function buildVocabShard(vocab, si) {
-  const shard = {};
-  for (const [mora, bucket] of vocab.byFirstMora) {
-    if (shardFor(mora) !== si) continue;
-    shard[mora] = bucket.map((w) => [
-      w.reading,
-      w.surface,
-      CATEGORY_TO_CODE[w.category] ?? 6,
-    ]);
-  }
-  return shard;
-}
-
-async function saveToCache(hashes, sourceNames, sourceTag, sourceMeta, jm, vocab, log) {
-  const estimate = await storageEstimate();
-  const available = estimate.quota - estimate.usage;
-  if (available < 30 * 1024 * 1024) {
-    log(`  空き容量不足 (${(available / 1024 / 1024).toFixed(0)} MB) → キャッシュをスキップします`);
-    log(
-      `dict-loader saveToCache: 空き容量不足によりスキップ。 Available=${(available / 1024 / 1024).toFixed(0)}MB Quota=${(estimate.quota / 1024 / 1024).toFixed(0)}MB Usage=${(estimate.usage / 1024 / 1024).toFixed(0)}MB`,
-      "warn"
-    );
-    return;
-  }
-
-  log("ブラウザキャッシュに保存中…");
-  await cacheDeleteByPrefix(CACHE_PREFIX);
-  await cacheDeleteByPrefix("shiritori-web-dict-v1");
-
-  log(`  ${NUM_SHARDS} シャード x2 を書き込み中…`);
-
-  for (let si = 0; si < NUM_SHARDS; si++) {
-    const bytes = zlibSync(strToU8(JSON.stringify(buildJmShard(jm, si))), {
-      level: 6,
-    });
-    try {
-      await cacheSet(`${CACHE_PREFIX}:jmdict:s${si}`, bytes);
-    } catch (e) {
-      log(`  jmdict:s${si} の保存に失敗しました: ${e.message}`);
-      log(`dict-loader saveToCache (jmdict s${si}) 失敗: ${e.name}: ${e.message}`, "error");
-    }
-    await new Promise((r) => setTimeout(r, 0));
-  }
-
-  for (let si = 0; si < NUM_SHARDS; si++) {
-    const bytes = zlibSync(strToU8(JSON.stringify(buildVocabShard(vocab, si))), {
-      level: 6,
-    });
-    try {
-      await cacheSet(`${CACHE_PREFIX}:vocab:s${si}`, bytes);
-    } catch (e) {
-      log(`  vocab:s${si} の保存に失敗しました: ${e.message}`);
-      log(`dict-loader saveToCache (vocab s${si}) 失敗: ${e.name}: ${e.message}`, "error");
-    }
-    await new Promise((r) => setTimeout(r, 0));
-  }
-
-  await cacheSet(`${CACHE_PREFIX}:meta`, {
-    hashes,
-    sources: sourceNames,
-    sourceTag,
-    sourceMeta,
-    savedAt: Date.now(),
-  });
 }
 
 /**
@@ -1183,88 +1209,151 @@ async function saveToCache(hashes, sourceNames, sourceTag, sourceMeta, jm, vocab
 export async function loadDictionaries(log = () => {}, options = {}) {
   const { forceReload = false, includeJmnedict = true } = options;
 
+  if (typeof crypto === "undefined" || !crypto.subtle) {
+    throw new Error(
+      "この環境では crypto.subtle (SHA-256) を利用できません。HTTPS または localhost でページを開いてください。"
+    );
+  }
+
   await storagePersist();
+  markStage("load-start");
 
   if (!forceReload) {
     try {
-      log("キャッシュの鮮度をHEADで確認中…");
-      const freshMeta = await checkFreshnessViaHead(log);
-      if (freshMeta) {
-        const cached = await loadFromCache(log);
-        return {
-          jmdict: new JmdictIndex(cached.bySurface, cached.byReading),
-          pool: cached.pool,
-          fromCache: true,
-          sourceTag: freshMeta.sourceTag || "cache",
-        };
+      const cached = await tryLoadFromCache(log, { includeJmnedict });
+      if (cached) {
+        markStage("cache:ready");
+        return cached;
       }
     } catch (e) {
-      log(`  HEAD確認に失敗: ${e.message} → ダウンロードします`);
-      log(`dict-loader checkFreshnessViaHead 失敗: ${e.name}: ${e.message}`, "warn");
+      log(`  キャッシュの確認に失敗: ${e.message} → 再構築します`);
+      sendWebhook(
+        `dict-loader tryLoadFromCache 失敗: ${e && e.name}: ${e && e.message}`,
+        "warn"
+      );
     }
   }
 
-  log("ソースファイルを取得中…");
-  const jmBuffers = await loadJmdictBuffers(log, { includeJmnedict });
-  const sudachiBuffer = await loadSudachiBuffer(log);
+  const gen = Date.now();
 
-  log("ソースファイルのハッシュを照合中…");
-  const hashes = {};
-  hashes.jmdict = await computeSha256Hex(jmBuffers.jmdict);
-  if (jmBuffers.jmnedict) {
-    hashes.jmnedict = await computeSha256Hex(jmBuffers.jmnedict);
+  try {
+    await cacheDelete(`${CACHE_PREFIX}:meta`);
+  } catch {}
+
+  const estimate = await storageEstimate();
+  const available =
+    estimate.quota === Infinity
+      ? Infinity
+      : estimate.quota - estimate.usage;
+  const cacheEnabled = available >= MIN_CACHE_FREE_BYTES;
+  if (!cacheEnabled) {
+    log(
+      `  空き容量不足 (${(available / 1024 / 1024).toFixed(0)} MB) → キャッシュなしで動作します`
+    );
   }
-  hashes.sudachi = await computeSha256Hex(sudachiBuffer.data);
+  const writer = createShardWriter({ gen, log, enabled: cacheEnabled });
+
+  const hashes = {};
+  const sourceMeta = {};
+  let sourceTag = "local";
+  const jmState = { urls: null, tag: null };
+
+  markStage("rebuild:fetch-jmdict");
+  const jmdictSource = await acquireJmSource(log, "jmdict", jmState);
+  if (jmState.tag) sourceTag = jmState.tag;
+  sourceMeta.jmdict = jmdictSource.meta;
+  hashes.jmdict = await computeSha256Hex(jmdictSource.data);
+
+  markStage("rebuild:parse-jmdict");
+  log("JMdictインデックスを構築中…");
+  await streamJmdictWordsInto(jmdictSource.data, "jmdict", writer, log, "JMdict");
+  log(`  エントリ ${(writer.counts.jmSurface + writer.counts.jmReading).toLocaleString()} 件`);
+  jmdictSource.data = null;
+
+  markStage("rebuild:fetch-jmnedict");
+  let jmnedictData = null;
+  try {
+    const jmnedictSource = await acquireJmSource(log, "jmnedict", jmState);
+    if (jmnedictSource) {
+      jmnedictData = jmnedictSource.data;
+      sourceMeta.jmnedict = jmnedictSource.meta;
+      hashes.jmnedict = await computeSha256Hex(jmnedictData);
+    }
+  } catch (e) {
+    log(`  JMnedictの取得に失敗: ${e.message}`);
+    sendWebhook(`dict-loader jmnedict取得失敗: ${e && e.name}: ${e && e.message}`, "warn");
+  }
+
+  if (jmnedictData) {
+    markStage("rebuild:parse-jmnedict");
+    await streamJmdictWordsInto(jmnedictData, "jmnedict", writer, log, "JMnedict");
+    log(`  エントリ ${(writer.counts.jmSurface + writer.counts.jmReading).toLocaleString()} 件`);
+    jmnedictData = null;
+  }
+
+  markStage("rebuild:fetch-sudachi");
+  const sudachi = await loadSudachiSource(log);
+  sourceMeta.sudachi = sudachi.meta;
+  hashes.sudachi = await computeSha256Hex(sudachi.data);
+
+  markStage("rebuild:parse-sudachi");
+  await parseSudachiInto(sudachi.data, sudachi.url, writer, log);
+  sudachi.data = null;
+
   const sourceNames = Object.keys(hashes);
   for (const [name, hex] of Object.entries(hashes)) {
     log(`  ${name}: ${hex.slice(0, 12)}…`);
   }
 
-  if (!forceReload) {
-    try {
-      log("キャッシュをハッシュで確認中…");
-      const valid = await findValidCache(hashes, sourceNames, log);
-      if (valid) {
-        const cached = await loadFromCache(log);
-        return {
-          jmdict: new JmdictIndex(cached.bySurface, cached.byReading),
-          pool: cached.pool,
-          fromCache: true,
-          sourceTag: valid.meta.sourceTag || "cache",
-        };
-      }
-    } catch (e) {
-      log(`  キャッシュの確認に失敗しました: ${e.name}: ${e.message}`);
-      log(`dict-loader findValidCache 失敗: ${e.name}: ${e.message}`, "error");
-    }
-  }
-
-  log("語彙を構築中…");
-  const jm = await parseJmdictSources(jmBuffers, log);
-  const vocab = await parseSudachiSource(sudachiBuffer, log);
-
-  const sourceMeta = { ...jmBuffers.sourceMeta, sudachi: sudachiBuffer.sourceMeta };
-
+  markStage("rebuild:save-cache");
+  let finalizeResult = null;
   try {
-    await saveToCache(
+    finalizeResult = await writer.finalize({
       hashes,
       sourceNames,
-      jmBuffers.sourceTag,
+      sourceTag,
       sourceMeta,
-      jm,
-      vocab,
-      log
-    );
+    });
   } catch (e) {
     log(`  キャッシュの保存に失敗しました: ${e.message}`);
     log("次回も辞書を再構築します。");
-    log(`dict-loader saveToCache 失敗: ${e.name}: ${e.message}\n${e.stack || ""}`, "error");
+    sendWebhook(
+      `dict-loader saveToCache 失敗: ${e && e.name}: ${e && e.message}\n${(e && e.stack) || ""}`,
+      "error"
+    );
+    finalizeResult = { degraded: true, ...writer.getEagerFallback() };
+  }
+  markStage("rebuild:done");
+
+  if (finalizeResult && !finalizeResult.degraded) {
+    return {
+      jmdict: new JmdictIndex(createJmIdbLoader({ gen })),
+      pool: new VocabPool(new Map(), {
+        loadMora: createVocabIdbLoader({ gen }).loadMora,
+      }),
+      fromCache: false,
+      sourceTag,
+    };
   }
 
+  const eager = finalizeResult
+    ? finalizeResult
+    : writer.getEagerFallback();
+  log("  キャッシュ無効のためRAM併用モードで動作します (次回起動時に再構築)");
+
+  const idbJmLoader = createJmIdbLoader({ gen });
+  const eagerLoader = createEagerJmLoader(eager.eagerJm);
+  const jmLoader = createCompositeJmLoader(eagerLoader, idbJmLoader);
+
+  const idbVocabLoader = createVocabIdbLoader({ gen });
+  const pool = new VocabPool(eagerVocabToPoolMap(eager.eagerVocab), {
+    loadMora: idbVocabLoader.loadMora,
+  });
+
   return {
-    jmdict: new JmdictIndex(jm.bySurface, jm.byReading),
-    pool: new VocabPool(vocab.byFirstMora),
+    jmdict: new JmdictIndex(jmLoader),
+    pool,
     fromCache: false,
-    sourceTag: jmBuffers.sourceTag,
+    sourceTag,
   };
 }

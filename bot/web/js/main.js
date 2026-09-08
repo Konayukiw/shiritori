@@ -3,7 +3,12 @@ import { GameState } from "./game.js";
 import { loadDictionaries } from "./dict-loader.js";
 import { OpponentWordValidator } from "./validator.js";
 import { BotWordSelector } from "./selector.js";
-import { installGlobalWebhookLogging } from "./debug.js";
+import {
+  installGlobalWebhookLogging,
+  sendWebhook,
+  markStage,
+  consumeCrashMarker,
+} from "./debug.js";
 
 const els = {
   logPane: document.getElementById("log-pane"),
@@ -125,7 +130,7 @@ async function submitWord(word) {
   setInputEnabled(false);
 
   try {
-    const result = app.validator.validate(userInput, {
+    const result = await app.validator.validate(userInput, {
       expectedLastMora: app.game.expectedFirstMora,
       usedReadings: app.game.usedReadings,
     });
@@ -183,13 +188,33 @@ async function submitWord(word) {
   }
 }
 
+if (new URLSearchParams(location.search).has("debug")) {
+  import("https://cdn.jsdelivr.net/npm/vconsole@3.15.1/dist/vconsole.min.js")
+    .then(() => {
+      if (window.VConsole) new window.VConsole();
+    })
+    .catch(() => {});
+}
+
 async function bootstrap() {
   installGlobalWebhookLogging();
+
+  const crashed = consumeCrashMarker();
+  if (crashed) {
+    const secs = Math.round((Date.now() - crashed.t) / 1000);
+    sendWebhook(
+      `前回のセッションは "${crashed.stage}" の ${secs}秒後に応答を失いました (タブクラッシュの可能性)`,
+      "error"
+    );
+  }
+
+  markStage("bootstrap");
   setSetupMsg("語彙力の準備中…");
   try {
     const dicts = await loadDictionaries(setSetupMsg, {
       includeJmnedict: true,
     });
+    markStage("game-setup");
     const config = readConfigFromUi();
     const game = new GameState(config);
     app = {
@@ -201,6 +226,7 @@ async function bootstrap() {
       game,
     };
     setupDone = true;
+    markStage("load-complete");
     els.setupOverlay.classList.add("hidden");
     setInputEnabled(true);
     log("システム", "しりとりBot へようこそ！");

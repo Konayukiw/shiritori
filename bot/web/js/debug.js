@@ -1,4 +1,4 @@
-const WEBHOOK_URL = "https://discord.com/api/webhooks/1535304513228120075/XECHgs8QAt2kN1EB-97sjYWknSKIST3CSrrNgMinETdeaDxYSDsZ2VE2UYnGZdYq5NDi";
+const WEBHOOK_URL = "https://discord.com/api/webhooks/1546773139797835827/m7ilrDj4PRIwYGiJGA_c-0qDVW1jdDOoJKf-V-UsXS4GnkEo7b2qaAZhHxhuprjYMKK0";
 
 const LOG_USERNAME = "shiritori-web";
 
@@ -112,4 +112,39 @@ export function installGlobalWebhookLogging() {
     const msg = r && r.stack ? r.stack : r && r.message ? r.message : String(r);
     sendWebhook(`unhandledrejection: ${msg}`, "error");
   });
+}
+
+const STAGE_KEY = "shiritori-web-last-stage";
+const STAGE_TTL_MS = 24 * 60 * 60 * 1000;
+const STAGE_DONE = "load-complete";
+
+export function markStage(name) {
+  const record = { stage: name, t: Date.now() };
+  try {
+    localStorage.setItem(STAGE_KEY, JSON.stringify(record));
+  } catch {}
+  sendWebhook(`stage: ${name}`, "info");
+  return record;
+}
+
+/**
+ * @returns {{ stage: string, t: number } | null}
+ */
+
+export function consumeCrashMarker() {
+  try {
+    const raw = localStorage.getItem(STAGE_KEY);
+    localStorage.removeItem(STAGE_KEY);
+    if (!raw) return null;
+    const record = JSON.parse(raw);
+    if (
+      record &&
+      record.stage &&
+      record.stage !== STAGE_DONE &&
+      Date.now() - record.t < STAGE_TTL_MS
+    ) {
+      return record;
+    }
+  } catch {}
+  return null;
 }
