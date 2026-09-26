@@ -28,10 +28,25 @@ class VocabPool:
         if not self.db_path.exists():
             raise FileNotFoundError(
                 f"語彙プール DB が見つかりません: {self.db_path}\n"
-                "先に `python -m shiritori_bot.data_prep.build_vocab_pool` を実行してください。"
+                "先に `python -m bot.data_prep.build_vocab_pool` を実行してください。"
             )
         self._conn = sqlite3.connect(f"file:{self.db_path.as_posix()}?mode=ro", uri=True, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        if not self._has_zipf():
+            raise FileNotFoundError(
+                f"語彙プール DB が古い形式です (頻度情報なし): {self.db_path}\n"
+                "語彙レベル機能には頻度情報が必要です。再構築してください:\n"
+                "  python -m bot.data_prep.build_vocab_pool --download"
+            )
+
+    def _has_zipf(self) -> bool:
+        try:
+            row = self._conn.execute(
+                "SELECT value FROM meta WHERE key = 'has_zipf'"
+            ).fetchone()
+        except sqlite3.Error:
+            return False
+        return bool(row and row["value"] == "1")
 
     def close(self) -> None:
         self._conn.close()
@@ -49,13 +64,9 @@ class VocabPool:
         allowed_categories: list[str],
         used_readings: set[str],
         require_dakuten_match: bool = True,
+        min_zipf: float | None = None,
         limit: int | None = None,
     ) -> list[BotWord]:
-        """first_mora で始まる候補を返す.
-
-        GitHub の ``shiritoriDictObj[startWith]`` に相当。
-        limit が None のときは該当候補をすべて返す（ランダム選択のため）。
-        """
         if not first_mora:
             return []
 
@@ -76,8 +87,10 @@ class VocabPool:
               AND category IN ({cat_ph})
         """
         params: list = [*keys, *allowed_categories]
+        if min_zipf is not None:
+            sql += " AND zipf >= ?"
+            params.append(min_zipf)
         if limit is not None:
-            # 後段フィルタで落ちる分を見込んで多めに取る
             sql += " LIMIT ?"
             params.append(max(limit * 5, limit))
 
@@ -175,16 +188,12 @@ class BotWordSelector:
         *,
         rng: random.Random | None = None,
     ) -> BotWord | None:
-        """required_first_mora で始まる語を1つ選ぶ. 無ければ None (Bot負け).
-
-        shiritori-Github ``SystemWordSelector`` と同じく、
-        候補配列から ``random.choice`` で 1 語を返す。
-        """
         candidates = self.pool.find_candidates(
             required_first_mora,
             allowed_categories=self._allowed_categories(),
             used_readings=used_readings,
             require_dakuten_match=self.config.require_dakuten_match,
+            min_zipf=self.config.min_vocab_zipf,
         )
         if not candidates:
             return None

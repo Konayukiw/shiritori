@@ -9,7 +9,7 @@ import socketserver
 import sys
 from pathlib import Path
 
-from bot.config import DEFAULT_RAW_DIR
+from bot.config import DEFAULT_CACHE_DIR, DEFAULT_RAW_DIR, FREQ_DATA_NAME
 
 WEB_ROOT = Path(__file__).resolve().parent
 DICTS_DIR = WEB_ROOT / "dicts"
@@ -23,13 +23,6 @@ def _find_first(patterns: list[Path]) -> Path | None:
 
 
 def ensure_dict_links(raw_dir: Path | None = None) -> None:
-    """Make original dictionary files available at ``bot/web/dicts/``.
-
-    Prefers already-present files in ``dicts/``. Otherwise copies (or on
-    Windows, falls back to copy) from ``data/raw`` so the browser can load
-    the *original* SudachiDict / JMdict / JMnedict artifacts — not the
-    SQLite vocab pool used by CLI/desktop.
-    """
     raw_dir = Path(raw_dir or DEFAULT_RAW_DIR)
     DICTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -41,6 +34,13 @@ def ensure_dict_links(raw_dir: Path | None = None) -> None:
         (
             "small_lex.csv",
             [raw_dir / "sudachi" / "small_lex.csv"],
+        ),
+        (
+            FREQ_DATA_NAME,
+            [
+                DEFAULT_CACHE_DIR / FREQ_DATA_NAME,
+                raw_dir / FREQ_DATA_NAME,
+            ],
         ),
         (
             "jmdict-eng.json.zip",

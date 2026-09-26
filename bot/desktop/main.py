@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-import sys
-import tempfile
 import threading
 import urllib.request
 import zipfile
@@ -12,24 +10,11 @@ from pathlib import Path
 
 import flet as ft
 
-from bot.config import GameConfig, default_config
+from bot.config import VOCAB_LEVELS, GameConfig, default_config, resolve_vocab_level
+from bot.data_prep.build_vocab_pool import build_pool, vocab_db_has_zipf
 from bot.utils.vocabs import BotWordSelector, VocabPool
-from bot.utils.kana_utils import (
-    contains_obsolete_kana,
-    is_allowed_surface,
-    is_kana_only_reading,
-    normalize_reading,
-    to_hiragana,
-)
+from bot.utils.kana_utils import normalize_reading, to_hiragana
 from bot.utils.validator import JmdictIndex, OpponentWordValidator
-from bot.utils.rules import (
-    check_default_bans,
-    effective_first_mora,
-    effective_last_mora,
-    ends_with_n,
-    is_one_mora_word,
-    mora_matches,
-)
 from bot.manager.session import GameState
 
 _USER_DATA_DIR = Path.home() / ".shiritori-bot"
@@ -144,138 +129,6 @@ def _build_jmdict_index(jmdict_json: Path, jmnedict_json: Path | None, out_db: P
     conn.close()
     log(f"  → {out_db.name} 完了 ({total} 行)")
 
-_VOCAB_SCHEMA = """
-CREATE TABLE IF NOT EXISTS meta (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS vocab (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    surface TEXT NOT NULL,
-    reading TEXT NOT NULL,
-    first_mora TEXT NOT NULL,
-    category TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_vocab_first_mora ON vocab(first_mora);
-CREATE INDEX IF NOT EXISTS idx_vocab_reading ON vocab(reading);
-CREATE INDEX IF NOT EXISTS idx_vocab_category ON vocab(category);
-"""
-
-
-def _classify_pos(pos1: str, pos2: str, pos3: str) -> str | None:
-    if pos1 == "名詞":
-        if pos2 == "固有名詞":
-            if pos3 == "人名":
-                return "person"
-            if pos3 == "地名":
-                return "place"
-            if pos3 in ("組織", "組織名"):
-                return "organization"
-            if pos3 in ("一般", "*"):
-                return "proper"
-            return "other"
-        if pos2 == "普通名詞" and pos3 == "一般":
-            return "general"
-        return None
-    if pos1 == "動詞":
-        return "verb"
-    return None
-
-
-def _build_vocab_pool(csv_paths: list[Path], out_db: Path, log) -> None:
-    out_db.parent.mkdir(parents=True, exist_ok=True)
-    if out_db.exists():
-        out_db.unlink()
-    conn = sqlite3.connect(out_db)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=OFF")
-    conn.executescript(_VOCAB_SCHEMA)
-    seen: set[str] = set()
-    batch: list[tuple[str, str, str, str]] = []
-    total = 0
-    skipped = 0
-    BATCH_SIZE = 5000
-
-    def flush():
-        nonlocal total, batch
-        if not batch:
-            return
-        conn.executemany(
-            "INSERT INTO vocab(surface, reading, first_mora, category) VALUES (?, ?, ?, ?)",
-            batch,
-        )
-        total += len(batch)
-        batch = []
-
-    for csv_path in csv_paths:
-        log(f"語彙を読み込み中... (3/3)")
-        import csv
-
-        with open(csv_path, encoding="utf-8", errors="replace", newline="") as f:
-            reader = csv.reader(f)
-            for row in reader:
-                if len(row) < 12:
-                    skipped += 1
-                    continue
-                surface = (row[4] or row[0] or "").strip()
-                reading_raw = (row[11] or "").strip()
-                pos1 = (row[5] or "").strip()
-                pos2 = (row[6] or "").strip()
-                pos3 = (row[7] or "").strip()
-                cform = (row[10] or "").strip() if len(row) > 10 else ""
-                norm = (row[12] or "").strip() if len(row) > 12 else ""
-
-                if not surface or not reading_raw or reading_raw == "*":
-                    skipped += 1
-                    continue
-                if pos1 in ("動詞", "形容詞") and not cform.startswith("終止形"):
-                    skipped += 1
-                    continue
-
-                category = _classify_pos(pos1, pos2, pos3)
-                if category is None:
-                    skipped += 1
-                    continue
-                if pos1 in ("動詞", "形容詞") and norm and norm != "*":
-                    surface = norm
-                if not is_allowed_surface(surface, allow_alnum=False):
-                    skipped += 1
-                    continue
-
-                reading = to_hiragana(normalize_reading(reading_raw))
-                if not reading:
-                    skipped += 1
-                    continue
-                if not is_kana_only_reading(reading, allow_alnum=False):
-                    skipped += 1
-                    continue
-                if contains_obsolete_kana(reading):
-                    skipped += 1
-                    continue
-                if is_one_mora_word(reading):
-                    skipped += 1
-                    continue
-                if ends_with_n(reading):
-                    skipped += 1
-                    continue
-                if reading in seen:
-                    skipped += 1
-                    continue
-                seen.add(reading)
-                first = effective_first_mora(reading) or reading[0]
-                batch.append((surface, reading, first, category))
-                if len(batch) >= BATCH_SIZE:
-                    flush()
-        flush()
-
-    conn.execute(
-        "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
-        ("entry_count", str(total)),
-    )
-    conn.commit()
-    conn.close()
-
-
 def _download(url: str, dest: Path, log) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists() and dest.stat().st_size > 0:
@@ -373,10 +226,26 @@ class ShiritoriApp:
         )
         self.cb_allow_alnum = ft.Checkbox(label="英数字を許可", value=False)
         self.cb_bot_first = ft.Checkbox(label="Bot から開始", value=False)
+        self.dd_vocab_level = ft.Dropdown(
+            label="Bot語彙レベル",
+            value=default_config().vocab_level,
+            options=[
+                ft.DropdownOption(key=level_id, text=label)
+                for level_id, (label, _) in sorted(
+                    VOCAB_LEVELS.items(),
+                    key=lambda kv: list(VOCAB_LEVELS).index(kv[0]),
+                )
+            ],
+            text_size=13,
+        )
 
         settings_col = ft.Column(
             [
                 ft.Text("設定", weight=ft.FontWeight.BOLD, size=16),
+                ft.Container(
+                    self.dd_vocab_level,
+                    padding=ft.padding.only(top=2, bottom=6),
+                ),
                 self.cb_person,
                 self.cb_place,
                 self.cb_org,
@@ -463,9 +332,17 @@ class ShiritoriApp:
             vocab_db = _USER_CACHE_DIR / VOCAB_DB_NAME
 
             if jmdict_db.exists() and vocab_db.exists():
-                self._log("システム", "データベースは既に存在します。")
-                self._finish_setup()
-                return
+                if vocab_db_has_zipf(vocab_db):
+                    self._log("システム", "データベースは既に存在します。")
+                    self._finish_setup()
+                    return
+                csvs = sorted((_USER_RAW_DIR / "sudachi").glob("*lex*.csv"))
+                if csvs:
+                    self._log("システム", "語彙データを更新しています… (頻度情報の付与)")
+                    build_pool(csvs, vocab_db, log=lambda msg: self._log("システム", msg))
+                    self._finish_setup()
+                    return
+                self._log("システム", "語彙データを再取得します…")
 
             self._log("システム", "データをダウンロード中... (1/4)")
             urls = _fetch_latest_jmdict_assets(lambda msg: self._log("システム", msg))
@@ -488,7 +365,7 @@ class ShiritoriApp:
                 zip_path = sudachi_dir / fname
                 _download(url, zip_path, lambda msg: self._log("システム", msg))
                 _unzip(zip_path, sudachi_dir, lambda msg: self._log("システム", msg))
-            csv_paths = sorted(sudachi_dir.glob("*lex*"))
+            csv_paths = sorted(sudachi_dir.glob("*lex*.csv"))
             if not csv_paths:
                 raise RuntimeError("SudachiDictにCSVファイルが見つかりません")
 
@@ -496,7 +373,7 @@ class ShiritoriApp:
             _build_jmdict_index(jmdict_json, jmnedict_json, jmdict_db, lambda msg: self._log("システム", msg))
 
             self._log("システム", "データをダウンロード中... (3/4)")
-            _build_vocab_pool(csv_paths, vocab_db, lambda msg: self._log("システム", msg))
+            build_pool(csv_paths, vocab_db, lambda msg: self._log("システム", msg))
 
             self._log("システム", "データをダウンロード中... (4/4)")
             self._finish_setup()
@@ -523,7 +400,6 @@ class ShiritoriApp:
             self._log("システム", "好きな単語を入力して遊んでください。")
             self._update_status()
             self.page.update()
-            # Worker thread: schedule async focus on the page event loop.
             self.page.run_task(self._refocus_input)
         except Exception as e:
             self._log("エラー", f"ゲーム初期化に失敗しました: {e}")
@@ -539,11 +415,6 @@ class ShiritoriApp:
         self.state = GameState(config=self.config)
 
     async def _refocus_input(self) -> None:
-        """Keep the word input focused so the next word can be typed immediately.
-
-        Flet 0.86+ exposes focus() as an async method that must be awaited;
-        calling it without await creates a no-op coroutine.
-        """
         if not self._setup_done or self.word_input.disabled:
             return
         try:
@@ -563,6 +434,7 @@ class ShiritoriApp:
         cfg.allow_verb = self.cb_verb.value
         cfg.require_dakuten_match = not self.cb_ignore_dakuten.value
         cfg.allow_alnum = self.cb_allow_alnum.value
+        cfg.vocab_level = resolve_vocab_level(self.dd_vocab_level.value)
         self.config = cfg
 
         if self.state is not None:

@@ -4,7 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from bot.config import GameConfig, default_config
+from bot.config import VOCAB_LEVELS, GameConfig, default_config, resolve_vocab_level
 from bot.utils.vocabs import BotWordSelector, VocabPool
 from bot.utils.validator import JmdictIndex, OpponentWordValidator
 from bot.manager.session import GameState
@@ -37,6 +37,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="アルファベット・数字を含む表記を許可",
     )
     p.add_argument(
+        "--vocab-level",
+        choices=sorted(VOCAB_LEVELS),
+        default=None,
+        metavar="LEVEL",
+        help="Bot語彙レベル ("
+        + ", ".join(f"{k}={v[0]}" for k, v in sorted(VOCAB_LEVELS.items()))
+        + ")",
+    )
+    p.add_argument(
+        "--min-zipf",
+        type=float,
+        default=None,
+        metavar="N",
+        help="Bot語彙の最低 wordfreq zipf 値を直接指定 (--vocab-level より優先)",
+    )
+    p.add_argument(
         "--cache-dir",
         type=Path,
         default=None,
@@ -67,6 +83,9 @@ def config_from_args(args: argparse.Namespace) -> GameConfig:
     cfg.allow_verb = args.verb
     cfg.require_dakuten_match = not args.ignore_dakuten
     cfg.allow_alnum = args.allow_alnum
+    cfg.vocab_level = resolve_vocab_level(args.vocab_level)
+    if args.min_zipf is not None:
+        cfg.min_zipf_override = args.min_zipf
     if args.cache_dir:
         cfg.cache_dir = args.cache_dir
     return cfg
@@ -85,6 +104,14 @@ def print_banner(cfg: GameConfig) -> None:
     print(f"  動詞: {'許可' if cfg.allow_verb else '禁止'}")
     print(f"  濁点一致: {'要求' if cfg.require_dakuten_match else '無視'}")
     print(f"  英数字: {'許可' if cfg.allow_alnum else '禁止'}")
+    min_zipf = cfg.min_vocab_zipf
+    level_label = VOCAB_LEVELS[resolve_vocab_level(cfg.vocab_level)][0]
+    if cfg.min_zipf_override is not None:
+        print(f"  語彙レベル: {level_label} (zipf >= {min_zipf})")
+    elif min_zipf is None:
+        print(f"  語彙レベル: {level_label} (フィルタなし)")
+    else:
+        print(f"  語彙レベル: {level_label} (zipf >= {min_zipf})")
     print()
     print("コマンド: quit / exit で終了, help でヘルプ")
     print("-" * 50)

@@ -33,6 +33,19 @@ jobs:
             -o bot/web/dicts/small_lex.zip
           ls -lh bot/web/dicts/small_lex.zip
 
+      - name: Setup Python (wordfreq data build)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wordfreq frequency data
+        run: |
+          pip install wordfreq jaconv
+          python3 -m bot.data_prep.build_freq_data \
+            --sudachi bot/web/dicts/small_lex.zip \
+            --out bot/web/dicts/wordfreq-ja.tsv.gz
+          ls -lh bot/web/dicts/wordfreq-ja.tsv.gz
+
       - name: Download JMdict / JMnedict originals (jmdict-simplified)
         run: |
           python3 <<'PY'

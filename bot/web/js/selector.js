@@ -1,5 +1,6 @@
 import { stripDakuten } from "./kana.js";
 import { effectiveLastMora, moraMatches } from "./rules.js";
+import { minVocabZipf } from "./config.js";
 
 /**
  * @typedef {{ surface: string, reading: string, category: string, effectiveLastMora?: string|null }} BotWord
@@ -47,7 +48,7 @@ export class VocabPool {
 
   async findCandidates(
     firstMora,
-    { allowedCategories, usedReadings, requireDakutenMatch = true }
+    { allowedCategories, usedReadings, requireDakutenMatch = true, minZipf = null }
   ) {
     if (!firstMora || !allowedCategories.length) return [];
 
@@ -71,6 +72,8 @@ export class VocabPool {
         if (!allowed.has(row.category)) continue;
         const reading = row.reading;
         if (usedReadings.has(reading) || seen.has(reading)) continue;
+        // zipf が null (頻度データ未取得) のときはフィルタせずフォールバック
+        if (minZipf != null && row.zipf != null && row.zipf < minZipf) continue;
         if (!moraMatches(firstMora, reading, requireDakutenMatch)) continue;
         const last = effectiveLastMora(reading);
         if (last === "ん") continue;
@@ -114,6 +117,7 @@ export class BotWordSelector {
       allowedCategories: this.allowedCategories(),
       usedReadings,
       requireDakutenMatch: this.config.requireDakutenMatch,
+      minZipf: minVocabZipf(this.config),
     });
     if (!candidates.length) return null;
     return candidates[Math.floor(Math.random() * candidates.length)];

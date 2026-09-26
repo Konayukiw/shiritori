@@ -40,6 +40,8 @@ def _safe_submodules(package: str) -> list[str]:
 # Real non-code package data only (collect_all would also dump .py as datas).
 flet_datas = collect_data_files("flet")
 flet_desktop_datas = collect_data_files("flet_desktop")
+# wordfreq data (large_ja.msgpack.gz etc.) for the vocab-level frequency filter
+wordfreq_datas = collect_data_files("wordfreq")
 
 # Optional offline Flet Windows client:
 # place the release artifact at vendor/flet-windows.zip
@@ -69,6 +71,13 @@ hiddenimports = sorted(
             "shiritori_bot.gui.app",
             # Direct deps
             "jaconv",
+            # Vocab-level frequency filter
+            "wordfreq",
+            "langcodes",
+            "ftfy",
+            "wcwidth",
+            "regex",
+            "locate",
             # Flet runtime deps that analysis can miss under excludes/pruning
             "httpx",
             "httpcore",
@@ -93,7 +102,7 @@ a = Analysis(
     ["bot/desktop/main.py"],
     pathex=[str(PROJECT_ROOT)],
     binaries=[],
-    datas=flet_datas + flet_desktop_datas + extra_datas,
+    datas=flet_datas + flet_desktop_datas + wordfreq_datas + extra_datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

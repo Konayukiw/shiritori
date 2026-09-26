@@ -96,11 +96,11 @@ def is_kana_only_reading(text: str, *, allow_alnum: bool = False) -> bool:
 def _is_cjk(ch: str) -> bool:
     code = ord(ch)
     return (
-        0x4E00 <= code <= 0x9FFF  # CJK Unified
-        or 0x3400 <= code <= 0x4DBF  # Extension A
-        or 0xF900 <= code <= 0xFAFF  # Compatibility
-        or 0x20000 <= code <= 0x2FA1F  # Extension B-F etc.
-        or 0x3005 <= code <= 0x3007  # 々 〇 〆 など
+        0x4E00 <= code <= 0x9FFF
+        or 0x3400 <= code <= 0x4DBF
+        or 0xF900 <= code <= 0xFAFF
+        or 0x20000 <= code <= 0x2FA1F
+        or 0x3005 <= code <= 0x3007
         or ch in "々〆ヵヶ"
     )
 

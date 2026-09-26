@@ -4,11 +4,14 @@ import csv
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Iterator, NamedTuple
 
 from bot.config import DEFAULT_CACHE_DIR, DEFAULT_RAW_DIR, VOCAB_DB_NAME
+from bot.utils.freq import compute_zipf
 from bot.utils.kana_utils import (
     contains_obsolete_kana,
     is_allowed_surface,
+    is_kana_char,
     is_kana_only_reading,
     normalize_reading,
     to_hiragana,
@@ -46,7 +49,8 @@ CREATE TABLE IF NOT EXISTS vocab (
     surface TEXT NOT NULL,
     reading TEXT NOT NULL,
     first_mora TEXT NOT NULL,
-    category TEXT NOT NULL
+    category TEXT NOT NULL,
+    zipf REAL NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_vocab_first_mora ON vocab(first_mora);
@@ -163,7 +167,68 @@ def _parse_row(row: list[str]) -> tuple[str, str, str] | None:
     return surface, reading, category
 
 
-def build_pool(csv_paths: list[Path], out_db: Path) -> int:
+def _has_kanji(text: str) -> bool:
+    return any(not is_kana_char(ch) for ch in text)
+
+
+def _is_kana_surface(text: str) -> bool:
+    return bool(text) and all(is_kana_char(ch) for ch in text)
+
+
+class VocabRow(NamedTuple):
+    surface: str
+    reading: str
+    category: str
+    zipf: float
+    rescued: bool
+
+
+def iter_vocab_rows(csv_paths: list[Path], log=print) -> Iterator[VocabRow | None]:
+    reading_best: dict[str, float] = {}
+    scanned = 0
+    for csv_path in csv_paths:
+        log(f"頻度インデックス構築中: {csv_path.name}")
+        with open(csv_path, encoding="utf-8", errors="replace", newline="") as f:
+            for row in csv.reader(f):
+                parsed = _parse_row(row)
+                if parsed is None:
+                    continue
+                surface, reading, _ = parsed
+                if _has_kanji(surface):
+                    z = compute_zipf(surface, reading)
+                    if z > reading_best.get(reading, 0.0):
+                        reading_best[reading] = z
+                scanned += 1
+                if scanned % 500000 == 0:
+                    log(f"  パス1 {scanned} 行…")
+    log(f"  パス1 完了: {scanned} 行スキャン")
+
+    inserted: set[str] = set()
+    for csv_path in csv_paths:
+        log(f"読み込み: {csv_path.name}")
+        with open(csv_path, encoding="utf-8", errors="replace", newline="") as f:
+            for row in csv.reader(f):
+                parsed = _parse_row(row)
+                if parsed is None:
+                    yield None
+                    continue
+                surface, reading, category = parsed
+                if reading in inserted:
+                    yield None
+                    continue
+                inserted.add(reading)
+
+                z = compute_zipf(surface, reading)
+                rescued = False
+                if z == 0 and _is_kana_surface(surface):
+                    inherited = reading_best.get(reading, 0.0)
+                    if inherited > 0:
+                        z = inherited
+                        rescued = True
+                yield VocabRow(surface, reading, category, round(z * 10) / 10, rescued)
+
+
+def build_pool(csv_paths: list[Path], out_db: Path, log=print) -> int:
     out_db.parent.mkdir(parents=True, exist_ok=True)
     if out_db.exists():
         out_db.unlink()
@@ -173,10 +238,11 @@ def build_pool(csv_paths: list[Path], out_db: Path) -> int:
     conn.execute("PRAGMA synchronous=OFF")
     conn.executescript(SCHEMA)
 
-    seen: set[str] = set()
-    batch: list[tuple[str, str, str, str]] = []
+    batch: list[tuple[str, str, str, str, float]] = []
     total = 0
     skipped = 0
+    unknown = 0
+    rescued = 0
     BATCH_SIZE = 5000
 
     def flush() -> None:
@@ -184,42 +250,49 @@ def build_pool(csv_paths: list[Path], out_db: Path) -> int:
         if not batch:
             return
         conn.executemany(
-            "INSERT INTO vocab(surface, reading, first_mora, category) VALUES (?, ?, ?, ?)",
+            "INSERT INTO vocab(surface, reading, first_mora, category, zipf) VALUES (?, ?, ?, ?, ?)",
             batch,
         )
         total += len(batch)
         batch = []
 
-    for csv_path in csv_paths:
-        print(f"読み込み: {csv_path.name}")
-        with open(csv_path, encoding="utf-8", errors="replace", newline="") as f:
-            reader = csv.reader(f)
-            for row in reader:
-                parsed = _parse_row(row)
-                if parsed is None:
-                    skipped += 1
-                    continue
-                surface, reading, category = parsed
-                if reading in seen:
-                    skipped += 1
-                    continue
-                seen.add(reading)
-                first = effective_first_mora(reading) or reading[0]
-                batch.append((surface, reading, first, category))
-                if len(batch) >= BATCH_SIZE:
-                    flush()
-                    print(
-                        f"\r  登録 {total + len(batch)} / skip {skipped}",
-                        end="",
-                        flush=True,
-                    )
-        flush()
-        print(f"\r  {csv_path.name}: 累計 {total} 語 (skip {skipped})")
+    for item in iter_vocab_rows(csv_paths, log=log):
+        if item is None:
+            skipped += 1
+            continue
+        if item.zipf == 0:
+            unknown += 1
+        if item.rescued:
+            rescued += 1
+        first = effective_first_mora(item.reading) or item.reading[0]
+        batch.append((item.surface, item.reading, first, item.category, item.zipf))
+        if len(batch) >= BATCH_SIZE:
+            flush()
+            print(
+                f"\r  登録 {total + len(batch)} / スキップ: {skipped}",
+                end="",
+                flush=True,
+            )
+    flush()
+    print(f"\r  累計 {total} 語 (スキップ: {skipped})")
 
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
         ("entry_count", str(total)),
     )
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+        ("has_zipf", "1"),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+        ("zipf_unknown_count", str(unknown)),
+    )
+    if rescued:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("zipf_rescued_count", str(rescued)),
+        )
     for row in conn.execute(
         "SELECT category, COUNT(*) FROM vocab GROUP BY category ORDER BY category"
     ):
@@ -231,8 +304,24 @@ def build_pool(csv_paths: list[Path], out_db: Path) -> int:
 
     conn.commit()
     conn.close()
-    print(f"書き出し: {out_db} ({total} 語)")
+    print(
+        f"書き出し: {out_db} ({total} 語, 頻度未知 {unknown} 語, かな救済 {rescued} 語)"
+    )
     return total
+
+
+def vocab_db_has_zipf(db_path: Path) -> bool:
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key = 'has_zipf'"
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
+    return bool(row and row[0] == "1")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -250,8 +339,8 @@ def main(argv: list[str] | None = None) -> int:
     if not csvs:
         print(
             "SudachiDict からファイルが見つかりません。\n"
-            "  python -m shiritori_bot.data_prep.download\n"
-            "  または: python -m shiritori_bot.data_prep.build_vocab_pool --download",
+            "  python -m bot.data_prep.download\n"
+            "  または: python -m bot.data_prep.build_vocab_pool --download",
             file=sys.stderr,
         )
         return 1

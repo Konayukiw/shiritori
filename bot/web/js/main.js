@@ -1,4 +1,4 @@
-import { defaultConfig } from "./config.js";
+import { defaultConfig, resolveVocabLevel } from "./config.js";
 import { GameState } from "./game.js";
 import { loadDictionaries } from "./dict-loader.js";
 import { OpponentWordValidator } from "./validator.js";
@@ -14,6 +14,7 @@ const els = {
   setupOverlay: document.getElementById("setup-overlay"),
   setupMsg: document.getElementById("setup-msg"),
   cbBotFirst: document.getElementById("cb-bot-first"),
+  selVocabLevel: document.getElementById("sel-vocab-level"),
   cbPerson: document.getElementById("cb-person"),
   cbPlace: document.getElementById("cb-place"),
   cbOrg: document.getElementById("cb-org"),
@@ -71,6 +72,7 @@ function setSetupMsg(msg) {
 
 function readConfigFromUi() {
   const cfg = defaultConfig();
+  cfg.vocabLevel = resolveVocabLevel(els.selVocabLevel.value);
   cfg.allowPerson = els.cbPerson.checked;
   cfg.allowPlace = els.cbPlace.checked;
   cfg.allowOrganization = els.cbOrg.checked;

@@ -53,6 +53,8 @@ python -m bot.cli.main
 | `--all-proper` | 人名/地名/組織/固有/その他をすべて許可 |
 | `--ignore-dakuten` | 濁点・半濁点の違いを無視（ほ⇔ぽ など） |
 | `--allow-alnum` | 英数字を含む表記を許可 |
+| `--vocab-level LEVEL` | Bot語彙レベル（`easy` / `standard` / `hard` / `unlimited`、既定: `standard`） |
+| `--min-zipf N` | Bot語彙の最低 wordfreq zipf 値を直接指定（`--vocab-level` より優先） |
 | `--bot-first` | Bot が先攻 |
 | `--cache-dir PATH` | SQLite の場所を指定 |
 
@@ -89,6 +91,18 @@ Botが受け取った単語に複数読みがある場合は **最初にマッ�
 - 表層に英数字が含まれる語は除外（形態素解析不一致フィルタの近似）
 - 1モーラ / 「ん」終わり / 旧仮名 / 非かな読みは除外
 - 動詞は `--verb` 時のみ。活用は**終止形のみ**
+
+#### Bot語彙レベル
+
+単語の知名度を [wordfreq](https://github.com/rspeer/wordfreq)（日本語頻度リスト, Zipfスケール）で測り、
+しきい値未満の単語を Bot が選ばないようにできます。Web / デスクトップは設定画面、CLI は `--vocab-level` で変更できます。
+
+| レベル | しきい値 (zipf) | 説明 |
+|--------|-----------------|------|
+| `easy` やさしめ | 3.5 以上 | 身近な単語のみ |
+| `standard` 標準 | 3.0 以上 | 一般常識レベル |
+| `hard` 難しめ | 2.0 以上 | 難しめの単語も使用 |
+| `unlimited` 制限なし | フィルタなし | 辞書の全語彙 |
 
 発話時の選択:
 

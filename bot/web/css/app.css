@@ -35,6 +35,17 @@ body {
 
 .sidebar h2 { font-size: 16px; font-weight: 700; margin-bottom: 4px; }
 .sidebar label { display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
+.sidebar label:has(select) { flex-wrap: wrap; }
+.sidebar select {
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  font-size: 13px;
+  background: #fff;
+  cursor: pointer;
+}
 .sidebar input[type="checkbox"] { accent-color: #4a90d9; }
 
 .sidebar button {

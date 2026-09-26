@@ -5,6 +5,7 @@ import {
   strToU8,
   zlibSync,
   unzlibSync,
+  gunzipSync,
 } from "https://cdn.jsdelivr.net/npm/fflate@0.8.2/esm/browser.js";
 
 import { DICT_SOURCES } from "./config.js";
@@ -54,8 +55,13 @@ const CODE_TO_CATEGORY = [
   "other",
 ];
 
-const CACHE_PREFIX = "shiritori-web-v3";
-const LEGACY_PREFIXES = ["shiritori-web-v2", "shiritori-web-dict-v1"];
+// v4: 語彙行に語彙レベル用の頻度 (zipf×10) を持つ
+const CACHE_PREFIX = "shiritori-web-v4";
+const LEGACY_PREFIXES = [
+  "shiritori-web-v3",
+  "shiritori-web-v2",
+  "shiritori-web-dict-v1",
+];
 const NUM_SHARDS = 16;
 const STREAM_CHUNK_BYTES = 1 << 20;
 const SCAN_WINDOW_LIMIT = 64 << 20;
@@ -481,13 +487,13 @@ function createEagerVocab() {
   const byFirstMora = new Map();
   let count = 0;
 
-  function add(firstMora, reading, surface, catCode) {
+  function add(firstMora, reading, surface, catCode, zipf10) {
     let bucket = byFirstMora.get(firstMora);
     if (!bucket) {
       bucket = [];
       byFirstMora.set(firstMora, bucket);
     }
-    bucket.push([reading, surface, catCode]);
+    bucket.push([reading, surface, catCode, zipf10]);
     count += 1;
   }
 
@@ -522,7 +528,7 @@ function createShardWriter({ gen, log, enabled }) {
       p.r.clear();
       const v = vocabPending[si];
       for (const [mora, rows] of v) {
-        for (const row of rows) eagerVocab.add(mora, row[0], row[1], row[2]);
+        for (const row of rows) eagerVocab.add(mora, row[0], row[1], row[2], row[3]);
       }
       v.clear();
     }
@@ -549,9 +555,9 @@ function createShardWriter({ gen, log, enabled }) {
     }
   }
 
-  function addVocabRow(firstMora, reading, surface, catCode) {
+  function addVocabRow(firstMora, reading, surface, catCode, zipf10) {
     if (degraded) {
-      eagerVocab.add(firstMora, reading, surface, catCode);
+      eagerVocab.add(firstMora, reading, surface, catCode, zipf10);
       addedUnits += 1;
       return;
     }
@@ -561,7 +567,7 @@ function createShardWriter({ gen, log, enabled }) {
       bucket = [];
       p.set(firstMora, bucket);
     }
-    bucket.push([reading, surface, catCode]);
+    bucket.push([reading, surface, catCode, zipf10]);
     pendingUnits += 1;
     addedUnits += 1;
   }
@@ -666,19 +672,20 @@ function createShardWriter({ gen, log, enabled }) {
     await flushAll();
   }
 
-  async function finalize({ hashes, sourceNames, sourceTag, sourceMeta }) {
+  async function finalize({ hashes, sourceNames, sourceTag, sourceMeta, freqIncluded }) {
     await flushAll();
     if (degraded) {
       return { degraded: true, eagerJm, eagerVocab };
     }
     await cacheSet(`${CACHE_PREFIX}:meta`, {
-      version: 3,
+      version: 4,
       gen,
       savedAt: Date.now(),
       hashes,
       sources: sourceNames,
       sourceTag,
       sourceMeta,
+      freqIncluded: !!freqIncluded,
       counts,
     });
     for (const legacy of LEGACY_PREFIXES) {
@@ -814,10 +821,11 @@ function createVocabIdbLoader({ gen }) {
     async loadMora(mora) {
       const shard = await getShard(shardFor(mora));
       const rows = shard.mora.get(mora) || [];
-      return rows.map(([reading, surface, catCode]) => ({
+      return rows.map(([reading, surface, catCode, zipf10]) => ({
         surface,
         reading,
         category: CODE_TO_CATEGORY[catCode] ?? "other",
+        zipf: zipf10 == null ? null : zipf10 / 10,
       }));
     },
   };
@@ -828,14 +836,44 @@ function eagerVocabToPoolMap(eagerVocab) {
   for (const [mora, rows] of eagerVocab.byFirstMora) {
     byFirstMora.set(
       mora,
-      rows.map(([reading, surface, catCode]) => ({
+      rows.map(([reading, surface, catCode, zipf10]) => ({
         surface,
         reading,
         category: CODE_TO_CATEGORY[catCode] ?? "other",
+        zipf: zipf10 == null ? null : zipf10 / 10,
       }))
     );
   }
   return byFirstMora;
+}
+
+/**
+ * wordfreq 由来の頻度データ (bot/web/dicts/wordfreq-ja.tsv.gz) を読み込む。
+ * 戻り値: 表層形 → zipf×10 の Map。ファイルが無い場合は null (フィルタ無効)。
+ */
+async function loadFreqData(log) {
+  try {
+    const res = await fetch(DICT_SOURCES.local.freqData);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    const text = strFromU8(gunzipSync(bytes));
+    const map = new Map();
+    for (const line of text.split("\n")) {
+      if (!line || line.charCodeAt(0) === 0x23 /* # */) continue;
+      const tab = line.indexOf("\t");
+      if (tab === -1) continue;
+      const z10 = Number(line.slice(tab + 1));
+      if (Number.isFinite(z10)) map.set(line.slice(0, tab), z10);
+    }
+    if (!map.size) throw new Error("頻度データが空です");
+    log(`  頻度データ: ${map.size.toLocaleString()} 語`);
+    return map;
+  } catch (e) {
+    log(
+      `  頻度データが利用できないため語彙レベルの絞り込みは無効になります (${e && e.message})`
+    );
+    return null;
+  }
 }
 
 async function resolveJmdictAssetUrls(log) {
@@ -970,6 +1008,14 @@ async function tryLoadFromCache(log, { includeJmnedict }) {
     return null;
   }
 
+  if (meta.freqIncluded === false) {
+    // 頻度データなしで構築したキャッシュ → ファイルが今あるなら再構築する
+    if ((await loadFreqData(() => {})) !== null) {
+      log("  頻度データが追加されたため語彙を再構築します");
+      return null;
+    }
+  }
+
   log("キャッシュ済みの語彙で開始します (遅延読み込み)");
   return {
     jmdict: new JmdictIndex(createJmIdbLoader({ gen: meta.gen })),
@@ -1076,10 +1122,10 @@ async function streamJmdictWordsInto(arrayBuffer, source, writer, log, label) {
   scanner.end();
 }
 
-async function parseSudachiInto(sudachiData, url, writer, log) {
+async function parseSudachiInto(sudachiData, url, writer, log, freqMap) {
   const st = { seen: new Set(), total: 0, skipped: 0, lineNo: 0 };
   const onLine = (line) => {
-    processSudachiLine(line, st, writer);
+    processSudachiLine(line, st, writer, freqMap);
     if (st.lineNo % 200000 === 0) {
       log(`  SudachiDict ${st.lineNo.toLocaleString()} 行…`);
     }
@@ -1103,7 +1149,7 @@ async function parseSudachiInto(sudachiData, url, writer, log) {
   log(`  → 語彙 ${st.total.toLocaleString()} 語 (スキップ ${st.skipped.toLocaleString()})`);
 }
 
-function processSudachiLine(line, st, writer) {
+function processSudachiLine(line, st, writer, freqMap) {
   st.lineNo += 1;
   if (!line) return;
   const row = parseCsvLine(line);
@@ -1170,7 +1216,8 @@ function processSudachiLine(line, st, writer) {
   st.seen.add(reading);
 
   const first = effectiveFirstMora(reading) || reading[0];
-  writer.addVocabRow(first, reading, surface, CATEGORY_TO_CODE[category] ?? 6);
+  const zipf10 = freqMap ? (freqMap.get(surface) ?? 0) : null;
+  writer.addVocabRow(first, reading, surface, CATEGORY_TO_CODE[category] ?? 6, zipf10);
   st.total += 1;
 }
 
@@ -1257,7 +1304,8 @@ export async function loadDictionaries(log = () => {}, options = {}) {
   sourceMeta.sudachi = sudachi.meta;
   hashes.sudachi = await computeSha256Hex(sudachi.data);
 
-  await parseSudachiInto(sudachi.data, sudachi.url, writer, log);
+  const freqMap = await loadFreqData(log);
+  await parseSudachiInto(sudachi.data, sudachi.url, writer, log, freqMap);
   sudachi.data = null;
 
   const sourceNames = Object.keys(hashes);
@@ -1272,6 +1320,7 @@ export async function loadDictionaries(log = () => {}, options = {}) {
       sourceNames,
       sourceTag,
       sourceMeta,
+      freqIncluded: freqMap != null,
     });
   } catch (e) {
     log(`  キャッシュの保存に失敗しました: ${e.message}`);

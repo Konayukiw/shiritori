@@ -1,3 +1,23 @@
+// Bot語彙レベル定義: id → { label, minZipf }
+// minZipf は wordfreq (ja) の Zipf スケール。null はフィルタなし。
+// Python 側 (bot/config.py) の VOCAB_LEVELS としきい値を揃えること。
+export const VOCAB_LEVELS = {
+  easy: { label: "やさしめ", minZipf: 3.5 },
+  standard: { label: "標準", minZipf: 3.0 },
+  hard: { label: "難しめ", minZipf: 2.0 },
+  unlimited: { label: "制限なし（ガチ勢向け）", minZipf: null },
+};
+
+export const DEFAULT_VOCAB_LEVEL = "standard";
+
+export function resolveVocabLevel(value) {
+  return value in VOCAB_LEVELS ? value : DEFAULT_VOCAB_LEVEL;
+}
+
+export function minVocabZipf(config) {
+  return VOCAB_LEVELS[resolveVocabLevel(config.vocabLevel)].minZipf;
+}
+
 export function defaultConfig() {
   return {
     allowPerson: false,
@@ -11,6 +31,7 @@ export function defaultConfig() {
     banOneMora: true,
     banObsoleteKana: true,
     banNEnding: true,
+    vocabLevel: DEFAULT_VOCAB_LEVEL,
   };
 }
 
@@ -59,6 +80,7 @@ export const DICT_SOURCES = {
     jmdictJson: "./dicts/jmdict-eng.json",
     jmnedictZip: "./dicts/jmnedict-all.json.zip",
     jmnedictJson: "./dicts/jmnedict-all.json",
+    freqData: "./dicts/wordfreq-ja.tsv.gz",
   },
   cacheVersion: "shiritori-web-dict-v1",
 };
