@@ -1,0 +1,27 @@
+__pycache__/*
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+.pytest_cache/
+
+data/raw/
+data/cache/
+*.sqlite3
+*.db
+
+# Original dicts mirrored for local web serving (Pages deploys them in CI)
+bot/web/dicts/*
+!bot/web/dicts/.gitkeep
+!bot/web/dicts/README.md
+
+# Node (web test tooling)
+node_modules/
+scripts/
+DEBUG.md
+webkit-test.yml
+
+# Trial desktop self-contained bundle (single-file exe-equivalent, see tests/desktop.py)
+tests/

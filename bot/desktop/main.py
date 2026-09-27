@@ -244,7 +244,7 @@ class ShiritoriApp:
                 ft.Text("設定", weight=ft.FontWeight.BOLD, size=16),
                 ft.Container(
                     self.dd_vocab_level,
-                    padding=ft.padding.only(top=2, bottom=6),
+                    padding=ft.Padding.only(top=2, bottom=6),
                 ),
                 self.cb_person,
                 self.cb_place,
